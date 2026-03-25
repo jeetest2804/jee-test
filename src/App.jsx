@@ -390,12 +390,17 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [studentPasswords, setStudentPasswords] = useState([]);
   const [newSP, setNewSP] = useState({ name:"", username:"", password:"" });
   const [spMsg, setSpMsg] = useState("");
+  const [savedKeys, setSavedKeys] = useState({ geminiApiKey:"", driveApiKey:"" });
   const paperRef = useRef(); const keyRef = useRef();
 
   useEffect(() => {
     (async () => {
       const sp = await dbGet("student-passwords") || [];
       setStudentPasswords(sp);
+      // Load saved API keys and pre-fill form
+      const keys = await dbGet("api-keys") || { geminiApiKey:"", driveApiKey:"" };
+      setSavedKeys(keys);
+      setForm(f => ({ ...f, geminiApiKey: keys.geminiApiKey, driveApiKey: keys.driveApiKey }));
     })();
   }, []);
 
@@ -492,7 +497,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
     setStatus("Test created!");
     setLoading(false);
     setView("dashboard");
-    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey:"", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
+    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey: savedKeys.geminiApiKey, driveApiKey: savedKeys.driveApiKey, drivePaperFileId:"", driveKeyFileId:"" });
     setPaperFile(null); setKeyFile(null);
   };
 
@@ -513,7 +518,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         <span style={{ color:"#e8c97e", fontWeight:800, fontSize:17, letterSpacing:1 }}>🎯 TestForge</span>
         <span style={{ color:"rgba(255,255,255,0.4)", fontSize:12 }}>Admin Panel</span>
         <div style={{ marginLeft:"auto", display:"flex", gap:12, alignItems:"center" }}>
-          {[["dashboard","Dashboard"],["create","New Test"],["students","Students"],["results","📊 Results"]].map(([v,l])=>(
+          {[["dashboard","Dashboard"],["create","New Test"],["students","Students"],["results","📊 Results"],["settings","⚙️ Settings"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
               style={{ padding:"7px 16px", borderRadius:8, border:"none", cursor:"pointer", fontFamily:"inherit", fontSize:13, fontWeight:700,
                 background: view===v ? "#e8c97e" : "rgba(255,255,255,0.08)", color: view===v ? "#1a1a2e" : "rgba(255,255,255,0.7)" }}>
@@ -586,6 +591,14 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               })}
             </div>
           </>
+        )}
+
+        {view === "settings" && (
+          <SettingsView savedKeys={savedKeys} onSave={async (keys) => {
+            await dbSet("api-keys", keys);
+            setSavedKeys(keys);
+            setForm(f => ({ ...f, geminiApiKey: keys.geminiApiKey, driveApiKey: keys.driveApiKey }));
+          }} />
         )}
 
         {view === "results" && (
@@ -688,12 +701,24 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
             </div>
 
             {(form.mode === "upload" || form.mode === "drive") && (
-              <div style={{ marginTop:20, background:"#fffde7", borderRadius:12, padding:16, border:"1px solid #ffe082" }}>
-                <Label>🤖 Gemini API Key (required to parse PDFs)</Label>
-                <Input value={form.geminiApiKey} onChange={v=>setForm(f=>({...f,geminiApiKey:v}))} placeholder="AIzaSy... (from Google AI Studio)" />
-                <div style={{ fontSize:11, color:"#a07800", marginTop:6 }}>
-                  Get free key at <b>aistudio.google.com</b> → Get API Key. Leave blank to use demo questions.
-                </div>
+              <div style={{ marginTop:20, borderRadius:12, padding:14, border:"1px solid #e0e0e0", background: form.geminiApiKey ? "#e8f5e9" : "#fff8e1" }}>
+                {form.geminiApiKey ? (
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:18 }}>✅</span>
+                    <div>
+                      <div style={{ fontWeight:700, color:"#2e7d32", fontSize:13 }}>Gemini API Key loaded from Settings</div>
+                      <div style={{ fontSize:11, color:"#888" }}>PDFs will be parsed automatically</div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <Label>🤖 Gemini API Key (not saved in Settings)</Label>
+                    <Input value={form.geminiApiKey} onChange={v=>setForm(f=>({...f,geminiApiKey:v}))} placeholder="AIzaSy... — or save permanently in ⚙️ Settings" />
+                    <div style={{ fontSize:11, color:"#a07800", marginTop:6 }}>
+                      Save once in <b>⚙️ Settings</b> so you never have to enter it again.
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -716,10 +741,17 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               <div style={{ marginTop:20, background:"#f8f9ff", borderRadius:14, padding:20, border:"1px solid #e8eaf6" }}>
                 <div style={{ fontWeight:700, color:"#3949ab", marginBottom:14, fontSize:14 }}>Google Drive Settings</div>
                 <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-                  <div>
-                    <Label>Google Drive API Key</Label>
-                    <Input value={form.driveApiKey} onChange={v=>setForm(f=>({...f,driveApiKey:v}))} placeholder="AIzaSy..." />
-                  </div>
+                  {form.driveApiKey ? (
+                    <div style={{ background:"#e8f5e9", borderRadius:10, padding:"10px 14px", display:"flex", alignItems:"center", gap:8 }}>
+                      <span>✅</span>
+                      <div style={{ fontSize:13, color:"#2e7d32", fontWeight:700 }}>Drive API Key loaded from Settings</div>
+                    </div>
+                  ) : (
+                    <div>
+                      <Label>Google Drive API Key (not saved in Settings)</Label>
+                      <Input value={form.driveApiKey} onChange={v=>setForm(f=>({...f,driveApiKey:v}))} placeholder="AIzaSy... — or save permanently in ⚙️ Settings" />
+                    </div>
+                  )}
                   <div>
                     <Label>Question Paper Google Drive File ID</Label>
                     <Input value={form.drivePaperFileId} onChange={v=>setForm(f=>({...f,drivePaperFileId:v}))} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs..." />
@@ -754,6 +786,138 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   SETTINGS VIEW  (save API keys once)
+───────────────────────────────────────────── */
+function SettingsView({ savedKeys, onSave }) {
+  const [gemini, setGemini] = useState(savedKeys.geminiApiKey || "");
+  const [drive, setDrive]   = useState(savedKeys.driveApiKey  || "");
+  const [msg, setMsg]       = useState("");
+  const [showGemini, setShowGemini] = useState(false);
+  const [showDrive,  setShowDrive]  = useState(false);
+
+  // Sync if parent loads keys after mount
+  useEffect(() => {
+    setGemini(savedKeys.geminiApiKey || "");
+    setDrive(savedKeys.driveApiKey   || "");
+  }, [savedKeys]);
+
+  const save = async () => {
+    await onSave({ geminiApiKey: gemini.trim(), driveApiKey: drive.trim() });
+    setMsg("✅ Keys saved! They will auto-fill every time you create a test.");
+    setTimeout(() => setMsg(""), 3500);
+  };
+
+  const clear = async () => {
+    setGemini(""); setDrive("");
+    await onSave({ geminiApiKey:"", driveApiKey:"" });
+    setMsg("🗑️ Keys cleared.");
+    setTimeout(() => setMsg(""), 2500);
+  };
+
+  const maskKey = (k) => k.length > 8 ? k.slice(0,6) + "••••••••" + k.slice(-4) : k ? "••••••••" : "";
+
+  return (
+    <div style={{ maxWidth:620 }}>
+      <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>⚙️ API Key Settings</h2>
+      <p style={{ color:"#888", fontSize:13, margin:"0 0 28px" }}>
+        Save your keys once here — they'll be remembered forever and auto-filled into every new test. Keys are stored only in your browser's local storage and never sent anywhere except the respective APIs.
+      </p>
+
+      {/* Gemini */}
+      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"1px solid #fff3cd" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+          <span style={{ fontSize:22 }}>🤖</span>
+          <div>
+            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini API Key</div>
+            <div style={{ fontSize:12, color:"#888" }}>Used to parse PDF question papers into test questions</div>
+          </div>
+          {savedKeys.geminiApiKey && (
+            <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>✅ Saved</span>
+          )}
+        </div>
+        <div style={{ display:"flex", gap:8, marginTop:14, alignItems:"center" }}>
+          <div style={{ position:"relative", flex:1 }}>
+            <input
+              type={showGemini ? "text" : "password"}
+              value={gemini}
+              onChange={e => setGemini(e.target.value)}
+              placeholder="AIzaSy..."
+              style={{ width:"100%", padding:"11px 42px 11px 13px", borderRadius:10, border:"1px solid #ddd", fontSize:14, outline:"none", background:"#fafafa", boxSizing:"border-box", fontFamily:"monospace" }}
+            />
+            <button onClick={() => setShowGemini(p=>!p)}
+              style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:16, color:"#aaa" }}>
+              {showGemini ? "🙈" : "👁️"}
+            </button>
+          </div>
+        </div>
+        {savedKeys.geminiApiKey && !showGemini && (
+          <div style={{ fontSize:12, color:"#aaa", marginTop:6, fontFamily:"monospace" }}>Current: {maskKey(savedKeys.geminiApiKey)}</div>
+        )}
+        <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
+          Get a free key → <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer"
+            style={{ color:"#3949ab", fontWeight:700 }}>aistudio.google.com → Get API Key</a>
+        </div>
+      </div>
+
+      {/* Drive */}
+      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:24, border:"1px solid #e3f2fd" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+          <span style={{ fontSize:22 }}>📁</span>
+          <div>
+            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Google Drive API Key</div>
+            <div style={{ fontSize:12, color:"#888" }}>Used to fetch PDF files directly from your Google Drive</div>
+          </div>
+          {savedKeys.driveApiKey && (
+            <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>✅ Saved</span>
+          )}
+        </div>
+        <div style={{ display:"flex", gap:8, marginTop:14, alignItems:"center" }}>
+          <div style={{ position:"relative", flex:1 }}>
+            <input
+              type={showDrive ? "text" : "password"}
+              value={drive}
+              onChange={e => setDrive(e.target.value)}
+              placeholder="AIzaSy..."
+              style={{ width:"100%", padding:"11px 42px 11px 13px", borderRadius:10, border:"1px solid #ddd", fontSize:14, outline:"none", background:"#fafafa", boxSizing:"border-box", fontFamily:"monospace" }}
+            />
+            <button onClick={() => setShowDrive(p=>!p)}
+              style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:16, color:"#aaa" }}>
+              {showDrive ? "🙈" : "👁️"}
+            </button>
+          </div>
+        </div>
+        {savedKeys.driveApiKey && !showDrive && (
+          <div style={{ fontSize:12, color:"#aaa", marginTop:6, fontFamily:"monospace" }}>Current: {maskKey(savedKeys.driveApiKey)}</div>
+        )}
+        <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
+          Get key → <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer"
+            style={{ color:"#3949ab", fontWeight:700 }}>Google Cloud Console → Credentials → Create API Key</a>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:12 }}>
+        <button onClick={save}
+          style={{ flex:1, padding:"13px", borderRadius:12, border:"none", background:"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, fontSize:15, cursor:"pointer", fontFamily:"Georgia, serif" }}>
+          💾 Save Keys
+        </button>
+        <button onClick={clear}
+          style={{ padding:"13px 20px", borderRadius:12, border:"1px solid #ffcdd2", background:"#ffebee", color:"#c62828", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"Georgia, serif" }}>
+          Clear
+        </button>
+      </div>
+      {msg && (
+        <div style={{ marginTop:14, padding:"12px 16px", borderRadius:10,
+          background: msg.startsWith("✅") ? "#e8f5e9" : "#fff3e0",
+          color: msg.startsWith("✅") ? "#2e7d32" : "#e65100",
+          fontSize:13, fontWeight:600, border: `1px solid ${msg.startsWith("✅") ? "#a5d6a7" : "#ffcc80"}` }}>
+          {msg}
+        </div>
+      )}
     </div>
   );
 }
