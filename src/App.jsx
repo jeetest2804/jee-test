@@ -10,7 +10,6 @@ async function dbGet(key) {
 async function dbSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
-// Session storage - survives page refresh but NOT tab close
 function sessionGet(key) {
   try { const v = sessionStorage.getItem(key); return v ? JSON.parse(v) : null; }
   catch { return null; }
@@ -47,7 +46,6 @@ function getTestStatus(test) {
   return TEST_STATUS.ENDED;
 }
 
-/* ── URL helpers ── */
 function getUrlParam(key) {
   const params = new URLSearchParams(window.location.hash.split("?")[1] || window.location.search);
   return params.get(key);
@@ -77,45 +75,24 @@ const DEMO_QUESTIONS = [
 ];
 
 /* ─────────────────────────────────────────────
-   AI PDF PARSER  (Gemini API)
+   AI PDF PARSER  — calls OUR backend /api/parse-pdf
+   The Gemini API key never touches the browser.
 ───────────────────────────────────────────── */
-async function parsePDF(base64, isKey, geminiApiKey) {
-  const prompt = isKey
-    ? `Extract answer key from this JEE PDF. Return ONLY JSON: {"answers":[{"q":1,"correct":"B","type":"mcq"},...]}  For integer type put the number. No markdown.`
-    : `Extract all questions from this JEE exam PDF. Return ONLY JSON:
-{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"...","options":["A)...","B)...","C)...","D)..."],"marks":4,"negative":-1}]}
-For integer type, options=[]. No markdown, no preamble.`;
+async function parsePDF(base64, isKey) {
+  const res = await fetch("/api/parse-pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base64, isKey }),
+  });
 
-  if (!geminiApiKey) {
-    console.warn("No Gemini API key provided, using demo questions.");
-    return null;
+  const json = await res.json();
+
+  if (!res.ok) {
+    // Surface the server's error message to the caller
+    throw new Error(json.error || `Server error ${res.status}`);
   }
 
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: "application/pdf", data: base64 } },
-              { text: prompt }
-            ]
-          }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 4000 }
-        })
-      }
-    );
-    const d = await res.json();
-    const txt = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const clean = txt.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
-  } catch(e) {
-    console.error("Gemini parsePDF error:", e);
-    return null;
-  }
+  return json.data; // { questions: [...] }  or  { answers: [...] }
 }
 
 /* ─────────────────────────────────────────────
@@ -152,7 +129,6 @@ export default function App() {
       const loadedTests = saved || [];
       if (saved) setTests(loadedTests);
 
-      // ── Restore session (survives refresh) ──
       const savedSession = sessionGet("session");
       if (savedSession?.user) {
         const { user: su, page: sp, activeTestId, submission: sub } = savedSession;
@@ -199,7 +175,6 @@ export default function App() {
 
   const saveTests = async (t) => { setTests(t); await dbSet("tests", t); };
 
-  // Persist session state to sessionStorage whenever it changes
   useEffect(() => {
     if (user && page !== "login" && page !== "shared-result") {
       sessionSet("session", {
@@ -225,11 +200,9 @@ export default function App() {
       const saved = await dbGet("tests");
       const test = (saved || []).find(t => t.id === directTestId);
       if (test) {
-        // Check if student already submitted this test
         const allResults = await dbGet("all-results") || {};
         const key = `${test.id}__${name}`;
         if (allResults[key]) {
-          // Already submitted — show their existing result instead
           setActiveTest(test);
           setSubmission(allResults[key]);
           setPage("results");
@@ -247,7 +220,6 @@ export default function App() {
     setSubmission(sub);
     const allResults = await dbGet("all-results") || {};
     const key = `${activeTest.id}__${user.name}`;
-    // Only save if this is the FIRST submission (first attempt only counts)
     if (!allResults[key]) {
       allResults[key] = sub;
       await dbSet("all-results", allResults);
@@ -362,7 +334,6 @@ function LoginScreen({ onLogin, tests, directTestId }) {
               <input type="password" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()}
                 placeholder={tab === "student" ? "Enter your password" : "Enter admin password"}
                 style={{ width:"100%", padding:"12px 14px", borderRadius:10, border:"1px solid rgba(232,201,126,0.25)", background:"rgba(255,255,255,0.05)", color:"white", fontSize:14, outline:"none", boxSizing:"border-box", fontFamily:"inherit" }} />
-              
             </div>
             {err && <div style={{ background:"rgba(229,57,53,0.15)", border:"1px solid #c62828", borderRadius:8, padding:"9px 13px", color:"#ef9a9a", fontSize:13 }}>{err}</div>}
             <button onClick={handle} disabled={loading}
@@ -381,26 +352,26 @@ function LoginScreen({ onLogin, tests, directTestId }) {
 ───────────────────────────────────────────── */
 function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [view, setView] = useState("dashboard");
-  const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey:"", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
+  const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
   const [paperFile, setPaperFile] = useState(null);
   const [keyFile, setKeyFile] = useState(null);
   const [status, setStatus] = useState("");
+  const [statusType, setStatusType] = useState("info"); // "info" | "error" | "success" | "warning"
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [studentPasswords, setStudentPasswords] = useState([]);
   const [newSP, setNewSP] = useState({ name:"", username:"", password:"" });
   const [spMsg, setSpMsg] = useState("");
-  const [savedKeys, setSavedKeys] = useState({ geminiApiKey:"", driveApiKey:"" });
+  const [savedDriveKey, setSavedDriveKey] = useState("");
   const paperRef = useRef(); const keyRef = useRef();
 
   useEffect(() => {
     (async () => {
       const sp = await dbGet("student-passwords") || [];
       setStudentPasswords(sp);
-      // Load saved API keys and pre-fill form
-      const keys = await dbGet("api-keys") || { geminiApiKey:"", driveApiKey:"" };
-      setSavedKeys(keys);
-      setForm(f => ({ ...f, geminiApiKey: keys.geminiApiKey, driveApiKey: keys.driveApiKey }));
+      const driveKey = await dbGet("drive-api-key") || "";
+      setSavedDriveKey(driveKey);
+      setForm(f => ({ ...f, driveApiKey: driveKey }));
     })();
   }, []);
 
@@ -442,44 +413,97 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 
   const toBase64 = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(f); });
 
+  const setMsg = (msg, type = "info") => { setStatus(msg); setStatusType(type); };
+
   const createTest = async () => {
-    if (!form.title.trim()) { setStatus("Enter a test title"); return; }
-    setLoading(true); setStatus("Processing...");
-    let questions = DEMO_QUESTIONS;
+    if (!form.title.trim()) { setMsg("Enter a test title", "error"); return; }
+
+    // Guard: if uploading PDFs, warn user that Gemini is server-side
+    // (no key needed from UI — it's in Vercel env)
+    setLoading(true);
+    setMsg("Starting...", "info");
+
+    let questions = null; // null means "not yet determined"
+    let geminiUsed = false;
+
     try {
       if (form.mode === "upload") {
         if (paperFile) {
-          setStatus("Parsing question paper with Gemini...");
+          setMsg("📄 Converting PDF to base64...", "info");
           const b64 = await toBase64(paperFile);
-          const res = await parsePDF(b64, false, form.geminiApiKey);
-          if (res?.questions?.length) questions = res.questions;
+          setMsg("🤖 Sending to Gemini AI to extract questions...", "info");
+          try {
+            const res = await parsePDF(b64, false);
+            if (res?.questions?.length) {
+              questions = res.questions;
+              geminiUsed = true;
+              setMsg(`✅ Gemini extracted ${questions.length} questions!`, "success");
+            } else {
+              setMsg("⚠️ Gemini returned no questions. Falling back to demo questions.", "warning");
+              questions = DEMO_QUESTIONS;
+            }
+          } catch (geminiErr) {
+            setMsg(`❌ Gemini error: ${geminiErr.message}. Falling back to demo questions.`, "error");
+            questions = DEMO_QUESTIONS;
+          }
+        } else {
+          questions = DEMO_QUESTIONS;
+          setMsg("No PDF uploaded — using demo questions.", "warning");
         }
-        if (keyFile) {
-          setStatus("Parsing answer key with Gemini...");
-          const b64 = await toBase64(keyFile);
-          const res = await parsePDF(b64, true, form.geminiApiKey);
-          if (res?.answers) {
-            const map = {}; res.answers.forEach(a=>map[a.q]=a.correct);
-            questions = questions.map(q=>({ ...q, correct: map[q.id]??q.correct }));
+
+        if (keyFile && geminiUsed) {
+          setMsg("🤖 Parsing answer key with Gemini...", "info");
+          try {
+            const b64 = await toBase64(keyFile);
+            const res = await parsePDF(b64, true);
+            if (res?.answers) {
+              const map = {}; res.answers.forEach(a => map[a.q] = a.correct);
+              questions = questions.map(q => ({ ...q, correct: map[q.id] ?? q.correct }));
+              setMsg(`✅ Answer key applied to ${Object.keys(map).length} questions.`, "success");
+            }
+          } catch (keyErr) {
+            setMsg(`⚠️ Answer key parse failed: ${keyErr.message}. Using extracted answers.`, "warning");
           }
         }
       } else if (form.mode === "drive") {
-        if (!form.driveApiKey || !form.drivePaperFileId) { setStatus("Enter Drive API key and File IDs"); setLoading(false); return; }
-        setStatus("Fetching from Google Drive...");
-        const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
-        const parsed = await parsePDF(paperB64, false, form.geminiApiKey);
-        if (parsed?.questions?.length) questions = parsed.questions;
-        if (form.driveKeyFileId) {
-          const keyB64 = await fetchDriveFile(form.driveKeyFileId, form.driveApiKey);
-          const keyRes = await parsePDF(keyB64, true, form.geminiApiKey);
-          if (keyRes?.answers) {
-            const map={}; keyRes.answers.forEach(a=>map[a.q]=a.correct);
-            questions = questions.map(q=>({ ...q, correct: map[q.id]??q.correct }));
-          }
+        if (!form.driveApiKey || !form.drivePaperFileId) {
+          setMsg("Enter Drive API key and Paper File ID", "error");
+          setLoading(false);
+          return;
         }
+        setMsg("📁 Fetching from Google Drive...", "info");
+        const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
+        setMsg("🤖 Sending to Gemini AI...", "info");
+        try {
+          const parsed = await parsePDF(paperB64, false);
+          if (parsed?.questions?.length) {
+            questions = parsed.questions;
+            geminiUsed = true;
+          } else {
+            questions = DEMO_QUESTIONS;
+            setMsg("⚠️ Gemini returned no questions. Using demo questions.", "warning");
+          }
+        } catch (err) {
+          setMsg(`❌ Gemini error: ${err.message}. Using demo questions.`, "error");
+          questions = DEMO_QUESTIONS;
+        }
+        if (form.driveKeyFileId && geminiUsed) {
+          try {
+            const keyB64 = await fetchDriveFile(form.driveKeyFileId, form.driveApiKey);
+            const keyRes = await parsePDF(keyB64, true);
+            if (keyRes?.answers) {
+              const map = {}; keyRes.answers.forEach(a => map[a.q] = a.correct);
+              questions = questions.map(q => ({ ...q, correct: map[q.id] ?? q.correct }));
+            }
+          } catch {}
+        }
+      } else {
+        // demo mode
+        questions = DEMO_QUESTIONS;
       }
-    } catch(e) {
-      setStatus("Could not parse PDFs, using demo questions");
+    } catch (e) {
+      setMsg("Unexpected error: " + e.message + " — using demo questions.", "error");
+      questions = DEMO_QUESTIONS;
     }
 
     const test = {
@@ -494,10 +518,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
     };
     const updated = [test, ...tests];
     await onSaveTests(updated);
-    setStatus("Test created!");
+    setMsg(geminiUsed ? `✅ Test created with ${questions.length} AI-extracted questions!` : "✅ Test created with demo questions.", "success");
     setLoading(false);
-    setView("dashboard");
-    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey: savedKeys.geminiApiKey, driveApiKey: savedKeys.driveApiKey, drivePaperFileId:"", driveKeyFileId:"" });
+    setTimeout(() => setView("dashboard"), 1500);
+    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey: savedDriveKey, drivePaperFileId:"", driveKeyFileId:"" });
     setPaperFile(null); setKeyFile(null);
   };
 
@@ -510,6 +534,13 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
     [TEST_STATUS.SCHEDULED]:{bg:"#fff3e0",col:"#e65100",dot:"#ff9800"},
     [TEST_STATUS.LIVE]:{bg:"#e8f5e9",col:"#2e7d32",dot:"#43a047"},
     [TEST_STATUS.ENDED]:{bg:"#f5f5f5",col:"#616161",dot:"#9e9e9e"}
+  };
+
+  const statusBannerStyle = {
+    info:    { background:"#e3f2fd", color:"#1565c0", border:"1px solid #90caf9" },
+    success: { background:"#e8f5e9", color:"#2e7d32", border:"1px solid #a5d6a7" },
+    warning: { background:"#fff8e1", color:"#e65100", border:"1px solid #ffe082" },
+    error:   { background:"#ffebee", color:"#c62828", border:"1px solid #ef9a9a" },
   };
 
   return (
@@ -594,10 +625,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         )}
 
         {view === "settings" && (
-          <SettingsView savedKeys={savedKeys} onSave={async (keys) => {
-            await dbSet("api-keys", keys);
-            setSavedKeys(keys);
-            setForm(f => ({ ...f, geminiApiKey: keys.geminiApiKey, driveApiKey: keys.driveApiKey }));
+          <SettingsView savedDriveKey={savedDriveKey} onSave={async (driveKey) => {
+            await dbSet("drive-api-key", driveKey);
+            setSavedDriveKey(driveKey);
+            setForm(f => ({ ...f, driveApiKey: driveKey }));
           }} />
         )}
 
@@ -610,7 +641,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
             <div style={{ background:"white", borderRadius:20, boxShadow:"0 2px 16px rgba(0,0,0,0.08)", padding:32, marginBottom:24 }}>
               <h2 style={{ margin:"0 0 8px", color:"#1a1a2e", fontSize:20 }}>Student Access Control</h2>
               <p style={{ color:"#888", fontSize:13, margin:"0 0 24px" }}>
-                Add students with username + password. Only listed students can log in. Students MUST use the exact username and password you set here.
+                Add students with username + password. Only listed students can log in.
               </p>
 
               <div style={{ background:"#f8f9ff", borderRadius:14, padding:20, border:"1px solid #e8eaf6", marginBottom:24 }}>
@@ -645,7 +676,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               {studentPasswords.length === 0 ? (
                 <div style={{ textAlign:"center", padding:"32px 0", color:"#bbb" }}>
                   <div style={{ fontSize:40, marginBottom:10 }}>🚪</div>
-                  <div>No students added yet. Add students above before sharing test links.</div>
+                  <div>No students added yet.</div>
                 </div>
               ) : (
                 <div>
@@ -663,7 +694,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 
         {view === "create" && (
           <div style={{ background:"white", borderRadius:20, boxShadow:"0 2px 16px rgba(0,0,0,0.08)", padding:32 }}>
-            <h2 style={{ margin:"0 0 24px", color:"#1a1a2e", fontSize:20 }}>Create New Test</h2>
+            <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>Create New Test</h2>
+            <p style={{ color:"#888", fontSize:13, margin:"0 0 24px" }}>
+              🤖 Gemini AI will automatically extract questions from your PDF — no API key needed here, it's configured on the server.
+            </p>
 
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
               <div style={{ gridColumn:"1/-1" }}>
@@ -689,7 +723,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
             <div style={{ marginTop:24 }}>
               <Label>How to load the question paper?</Label>
               <div style={{ display:"flex", gap:10, marginTop:8, flexWrap:"wrap" }}>
-                {[["upload","Upload PDF"],["drive","Google Drive"],["demo","Use Demo Questions"]].map(([val,lbl])=>(
+                {[["upload","📄 Upload PDF"],["drive","📁 Google Drive"],["demo","🎯 Use Demo Questions"]].map(([val,lbl])=>(
                   <button key={val} onClick={()=>setForm(f=>({...f,mode:val}))}
                     style={{ padding:"10px 20px", borderRadius:10, border:`2px solid ${form.mode===val?"#e8c97e":"#e0e0e0"}`,
                       background:form.mode===val?"#fffde7":"white", color:form.mode===val?"#7c6a00":"#888",
@@ -700,36 +734,27 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               </div>
             </div>
 
+            {/* Gemini info banner — no key input needed */}
             {(form.mode === "upload" || form.mode === "drive") && (
-              <div style={{ marginTop:20, borderRadius:12, padding:14, border:"1px solid #e0e0e0", background: form.geminiApiKey ? "#e8f5e9" : "#fff8e1" }}>
-                {form.geminiApiKey ? (
-                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                    <span style={{ fontSize:18 }}>✅</span>
-                    <div>
-                      <div style={{ fontWeight:700, color:"#2e7d32", fontSize:13 }}>Gemini API Key loaded from Settings</div>
-                      <div style={{ fontSize:11, color:"#888" }}>PDFs will be parsed automatically</div>
-                    </div>
+              <div style={{ marginTop:20, borderRadius:12, padding:16, border:"1px solid #c8e6c9", background:"#e8f5e9", display:"flex", alignItems:"flex-start", gap:12 }}>
+                <span style={{ fontSize:24 }}>🤖</span>
+                <div>
+                  <div style={{ fontWeight:700, color:"#2e7d32", fontSize:14 }}>Gemini AI is ready</div>
+                  <div style={{ fontSize:12, color:"#555", marginTop:3 }}>
+                    Questions will be extracted automatically using the Gemini API key configured on your server (Vercel environment variable). You don't need to enter anything here.
                   </div>
-                ) : (
-                  <>
-                    <Label>🤖 Gemini API Key (not saved in Settings)</Label>
-                    <Input value={form.geminiApiKey} onChange={v=>setForm(f=>({...f,geminiApiKey:v}))} placeholder="AIzaSy... — or save permanently in ⚙️ Settings" />
-                    <div style={{ fontSize:11, color:"#a07800", marginTop:6 }}>
-                      Save once in <b>⚙️ Settings</b> so you never have to enter it again.
-                    </div>
-                  </>
-                )}
+                </div>
               </div>
             )}
 
             {form.mode === "upload" && (
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginTop:20 }}>
-                {[["Question Paper PDF", paperRef, paperFile, setPaperFile],["Answer Key PDF", keyRef, keyFile, setKeyFile]].map(([lbl,ref,file,setter])=>(
+                {[["Question Paper PDF", paperRef, paperFile, setPaperFile],["Answer Key PDF (optional)", keyRef, keyFile, setKeyFile]].map(([lbl,ref,file,setter])=>(
                   <div key={lbl}>
                     <Label>{lbl}</Label>
                     <div onClick={()=>ref.current.click()} style={{ border:"2px dashed #d0d0d0", borderRadius:12, padding:20, textAlign:"center", cursor:"pointer", background:file?"#f0fdf4":"#fafafa" }}>
                       <input type="file" accept=".pdf" ref={ref} style={{ display:"none" }} onChange={e=>setter(e.target.files[0])} />
-                      {file ? <div style={{ color:"#2e7d32", fontSize:13, fontWeight:600 }}>{file.name}</div>
+                      {file ? <div style={{ color:"#2e7d32", fontSize:13, fontWeight:600 }}>✅ {file.name}</div>
                              : <div style={{ color:"#bbb", fontSize:13 }}>Click to upload PDF</div>}
                     </div>
                   </div>
@@ -748,7 +773,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
                     </div>
                   ) : (
                     <div>
-                      <Label>Google Drive API Key (not saved in Settings)</Label>
+                      <Label>Google Drive API Key</Label>
                       <Input value={form.driveApiKey} onChange={v=>setForm(f=>({...f,driveApiKey:v}))} placeholder="AIzaSy... — or save permanently in ⚙️ Settings" />
                     </div>
                   )}
@@ -771,16 +796,16 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
             )}
 
             {status && (
-              <div style={{ marginTop:16, padding:"12px 16px", borderRadius:10, background:"#e3f2fd", color:"#1565c0", fontSize:13, fontWeight:600 }}>
+              <div style={{ marginTop:16, padding:"12px 16px", borderRadius:10, fontSize:13, fontWeight:600, ...statusBannerStyle[statusType] }}>
                 {status}
               </div>
             )}
 
             <div style={{ display:"flex", gap:12, marginTop:24 }}>
-              <button onClick={()=>setView("dashboard")} style={{ padding:"13px 24px", borderRadius:12, border:"2px solid #e0e0e0", background:"white", color:"#555", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
+              <button onClick={()=>{ setView("dashboard"); setStatus(""); }} style={{ padding:"13px 24px", borderRadius:12, border:"2px solid #e0e0e0", background:"white", color:"#555", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
               <button onClick={createTest} disabled={loading}
                 style={{ flex:1, padding:"13px", borderRadius:12, border:"none", background:loading?"#ccc":"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, cursor:loading?"default":"pointer", fontSize:15, fontFamily:"inherit" }}>
-                {loading ? "Creating..." : "Create Test"}
+                {loading ? "Processing..." : "Create Test"}
               </button>
             </div>
           </div>
@@ -791,88 +816,55 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 }
 
 /* ─────────────────────────────────────────────
-   SETTINGS VIEW  (save API keys once)
+   SETTINGS VIEW  — only Drive key here now
+   Gemini key is server-side (Vercel env var)
 ───────────────────────────────────────────── */
-function SettingsView({ savedKeys, onSave }) {
-  const [gemini, setGemini] = useState(savedKeys.geminiApiKey || "");
-  const [drive, setDrive]   = useState(savedKeys.driveApiKey  || "");
-  const [msg, setMsg]       = useState("");
-  const [showGemini, setShowGemini] = useState(false);
-  const [showDrive,  setShowDrive]  = useState(false);
+function SettingsView({ savedDriveKey, onSave }) {
+  const [drive, setDrive] = useState(savedDriveKey || "");
+  const [msg, setMsg] = useState("");
+  const [showDrive, setShowDrive] = useState(false);
 
-  // Sync if parent loads keys after mount
-  useEffect(() => {
-    setGemini(savedKeys.geminiApiKey || "");
-    setDrive(savedKeys.driveApiKey   || "");
-  }, [savedKeys]);
+  useEffect(() => { setDrive(savedDriveKey || ""); }, [savedDriveKey]);
 
   const save = async () => {
-    await onSave({ geminiApiKey: gemini.trim(), driveApiKey: drive.trim() });
-    setMsg("✅ Keys saved! They will auto-fill every time you create a test.");
-    setTimeout(() => setMsg(""), 3500);
-  };
-
-  const clear = async () => {
-    setGemini(""); setDrive("");
-    await onSave({ geminiApiKey:"", driveApiKey:"" });
-    setMsg("🗑️ Keys cleared.");
-    setTimeout(() => setMsg(""), 2500);
+    await onSave(drive.trim());
+    setMsg("✅ Drive key saved!");
+    setTimeout(() => setMsg(""), 3000);
   };
 
   const maskKey = (k) => k.length > 8 ? k.slice(0,6) + "••••••••" + k.slice(-4) : k ? "••••••••" : "";
 
   return (
     <div style={{ maxWidth:620 }}>
-      <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>⚙️ API Key Settings</h2>
+      <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>⚙️ Settings</h2>
       <p style={{ color:"#888", fontSize:13, margin:"0 0 28px" }}>
-        Save your keys once here — they'll be remembered forever and auto-filled into every new test. Keys are stored only in your browser's local storage and never sent anywhere except the respective APIs.
+        The Gemini API key is configured securely on the server (Vercel environment variable) and is never exposed to the browser. Only the Google Drive API key is stored here.
       </p>
 
-      {/* Gemini */}
-      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"1px solid #fff3cd" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+      {/* Gemini info card */}
+      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"2px solid #e8f5e9" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <span style={{ fontSize:22 }}>🤖</span>
           <div>
             <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini API Key</div>
-            <div style={{ fontSize:12, color:"#888" }}>Used to parse PDF question papers into test questions</div>
+            <div style={{ fontSize:12, color:"#888" }}>Stored securely as a Vercel environment variable</div>
           </div>
-          {savedKeys.geminiApiKey && (
-            <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>✅ Saved</span>
-          )}
+          <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>🔒 Server-side</span>
         </div>
-        <div style={{ display:"flex", gap:8, marginTop:14, alignItems:"center" }}>
-          <div style={{ position:"relative", flex:1 }}>
-            <input
-              type={showGemini ? "text" : "password"}
-              value={gemini}
-              onChange={e => setGemini(e.target.value)}
-              placeholder="AIzaSy..."
-              style={{ width:"100%", padding:"11px 42px 11px 13px", borderRadius:10, border:"1px solid #ddd", fontSize:14, outline:"none", background:"#fafafa", boxSizing:"border-box", fontFamily:"monospace" }}
-            />
-            <button onClick={() => setShowGemini(p=>!p)}
-              style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:16, color:"#aaa" }}>
-              {showGemini ? "🙈" : "👁️"}
-            </button>
-          </div>
-        </div>
-        {savedKeys.geminiApiKey && !showGemini && (
-          <div style={{ fontSize:12, color:"#aaa", marginTop:6, fontFamily:"monospace" }}>Current: {maskKey(savedKeys.geminiApiKey)}</div>
-        )}
-        <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
-          Get a free key → <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer"
-            style={{ color:"#3949ab", fontWeight:700 }}>aistudio.google.com → Get API Key</a>
+        <div style={{ marginTop:12, background:"#f8f9ff", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#555" }}>
+          To change the key: go to <b>Vercel → Your Project → Settings → Environment Variables</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>GEMINI_API_KEY</code> → Redeploy.
         </div>
       </div>
 
-      {/* Drive */}
+      {/* Drive key */}
       <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:24, border:"1px solid #e3f2fd" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
           <span style={{ fontSize:22 }}>📁</span>
           <div>
             <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Google Drive API Key</div>
-            <div style={{ fontSize:12, color:"#888" }}>Used to fetch PDF files directly from your Google Drive</div>
+            <div style={{ fontSize:12, color:"#888" }}>Used to fetch PDFs directly from your Google Drive</div>
           </div>
-          {savedKeys.driveApiKey && (
+          {savedDriveKey && (
             <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>✅ Saved</span>
           )}
         </div>
@@ -891,8 +883,8 @@ function SettingsView({ savedKeys, onSave }) {
             </button>
           </div>
         </div>
-        {savedKeys.driveApiKey && !showDrive && (
-          <div style={{ fontSize:12, color:"#aaa", marginTop:6, fontFamily:"monospace" }}>Current: {maskKey(savedKeys.driveApiKey)}</div>
+        {savedDriveKey && !showDrive && (
+          <div style={{ fontSize:12, color:"#aaa", marginTop:6, fontFamily:"monospace" }}>Current: {maskKey(savedDriveKey)}</div>
         )}
         <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
           Get key → <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer"
@@ -900,21 +892,12 @@ function SettingsView({ savedKeys, onSave }) {
         </div>
       </div>
 
-      <div style={{ display:"flex", gap:12 }}>
-        <button onClick={save}
-          style={{ flex:1, padding:"13px", borderRadius:12, border:"none", background:"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, fontSize:15, cursor:"pointer", fontFamily:"Georgia, serif" }}>
-          💾 Save Keys
-        </button>
-        <button onClick={clear}
-          style={{ padding:"13px 20px", borderRadius:12, border:"1px solid #ffcdd2", background:"#ffebee", color:"#c62828", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"Georgia, serif" }}>
-          Clear
-        </button>
-      </div>
+      <button onClick={save}
+        style={{ width:"100%", padding:"13px", borderRadius:12, border:"none", background:"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, fontSize:15, cursor:"pointer", fontFamily:"Georgia, serif" }}>
+        💾 Save Drive Key
+      </button>
       {msg && (
-        <div style={{ marginTop:14, padding:"12px 16px", borderRadius:10,
-          background: msg.startsWith("✅") ? "#e8f5e9" : "#fff3e0",
-          color: msg.startsWith("✅") ? "#2e7d32" : "#e65100",
-          fontSize:13, fontWeight:600, border: `1px solid ${msg.startsWith("✅") ? "#a5d6a7" : "#ffcc80"}` }}>
+        <div style={{ marginTop:14, padding:"12px 16px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontSize:13, fontWeight:600, border:"1px solid #a5d6a7" }}>
           {msg}
         </div>
       )}
@@ -923,7 +906,7 @@ function SettingsView({ savedKeys, onSave }) {
 }
 
 /* ─────────────────────────────────────────────
-   ADMIN RESULTS VIEW  (marks visible to admin/teacher)
+   ADMIN RESULTS VIEW
 ───────────────────────────────────────────── */
 function AdminResultsView({ tests }) {
   const [allResults, setAllResults] = useState({});
@@ -986,7 +969,6 @@ function AdminResultsView({ tests }) {
               </thead>
               <tbody>
                 {testEntries.sort((a,b) => {
-                  // Sort by score desc
                   const scoreOf = ([,sub]) => {
                     const qs = selectedTest.questions || DEMO_QUESTIONS;
                     return qs.reduce((acc,q,i) => {
@@ -1125,7 +1107,6 @@ function StudentScreen({ user, tests, onStart, onLogout }) {
                   : <button onClick={()=>onStart(test)} style={{ padding:"10px 22px", borderRadius:10, border:"none", background:"linear-gradient(135deg,#e53935,#c62828)", color:"white", fontWeight:800, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Start Test</button>
               } />
           ))}
-          ))}
         </Section>
 
         <Section title="Scheduled" count={upcoming.length} color="#f57c00">
@@ -1190,7 +1171,6 @@ function TestScreen({ test, student, onSubmit }) {
   const qs = test.questions || DEMO_QUESTIONS;
   const draftKey = `draft__${test.id}__${student.name}`;
 
-  // Restore draft from sessionStorage on mount
   const savedDraft = sessionGet(draftKey) || {};
   const [idx, setIdx] = useState(savedDraft.idx ?? 0);
   const [answers, setAnswers] = useState(savedDraft.answers || {});
@@ -1202,7 +1182,6 @@ function TestScreen({ test, student, onSubmit }) {
   const [timeLeft, setTimeLeft] = useState(savedDraft.timeLeft ?? (test.durationMins||180)*60);
   const [confirm, setConfirm] = useState(false);
 
-  // Auto-save draft to sessionStorage on every state change
   useEffect(() => {
     sessionSet(draftKey, { idx, answers, intInputs, qStatus, timeLeft });
   }, [idx, answers, intInputs, qStatus, timeLeft]);
@@ -1226,7 +1205,7 @@ function TestScreen({ test, student, onSubmit }) {
   const doSubmit = () => {
     const finalAns = {};
     qs.forEach((q,i) => { finalAns[i] = q.type==="integer" ? parseFloat(intInputs[i]) : answers[i]; });
-    sessionDel(draftKey); // Clear saved draft after submission
+    sessionDel(draftKey);
     onSubmit({ answers:finalAns, qStatuses:qStatus, timeTaken:(test.durationMins||180)*60 - timeLeft });
   };
 
@@ -1338,7 +1317,7 @@ function TestScreen({ test, student, onSubmit }) {
 }
 
 /* ─────────────────────────────────────────────
-   RESULTS SCREEN  (with shareable link)
+   RESULTS SCREEN
 ───────────────────────────────────────────── */
 function ResultsScreen({ test, student, submission, onBack }) {
   const qs = test.questions || DEMO_QUESTIONS;
@@ -1472,8 +1451,8 @@ function ResultsScreen({ test, student, submission, onBack }) {
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
                       {["A","B","C","D"][oi]}) {opt}
-                      {String(r.correct)===String(oi)&&" - Correct Answer"}
-                      {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" - Your Answer"}
+                      {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
+                      {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
                   )) : (
                     <div style={{ fontSize:14 }}>
