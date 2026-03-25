@@ -10,6 +10,17 @@ async function dbGet(key) {
 async function dbSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
+// Session storage - survives page refresh but NOT tab close
+function sessionGet(key) {
+  try { const v = sessionStorage.getItem(key); return v ? JSON.parse(v) : null; }
+  catch { return null; }
+}
+function sessionSet(key, val) {
+  try { sessionStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+function sessionDel(key) {
+  try { sessionStorage.removeItem(key); } catch {}
+}
 
 /* ─────────────────────────────────────────────
    CONSTANTS / HELPERS
@@ -66,28 +77,45 @@ const DEMO_QUESTIONS = [
 ];
 
 /* ─────────────────────────────────────────────
-   AI PDF PARSER  (Claude API)
+   AI PDF PARSER  (Gemini API)
 ───────────────────────────────────────────── */
-async function parsePDF(base64, isKey) {
+async function parsePDF(base64, isKey, geminiApiKey) {
   const prompt = isKey
     ? `Extract answer key from this JEE PDF. Return ONLY JSON: {"answers":[{"q":1,"correct":"B","type":"mcq"},...]}  For integer type put the number. No markdown.`
     : `Extract all questions from this JEE exam PDF. Return ONLY JSON:
 {"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"...","options":["A)...","B)...","C)...","D)..."],"marks":4,"negative":-1}]}
 For integer type, options=[]. No markdown, no preamble.`;
+
+  if (!geminiApiKey) {
+    console.warn("No Gemini API key provided, using demo questions.");
+    return null;
+  }
+
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:4000,
-        messages:[{ role:"user", content:[
-          { type:"document", source:{ type:"base64", media_type:"application/pdf", data:base64 }},
-          { type:"text", text:prompt }
-        ]}]
-      })
-    });
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: "application/pdf", data: base64 } },
+              { text: prompt }
+            ]
+          }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 4000 }
+        })
+      }
+    );
     const d = await res.json();
-    const txt = d.content?.map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
-    return JSON.parse(txt);
-  } catch { return null; }
+    const txt = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const clean = txt.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+  } catch(e) {
+    console.error("Gemini parsePDF error:", e);
+    return null;
+  }
 }
 
 /* ─────────────────────────────────────────────
@@ -124,6 +152,23 @@ export default function App() {
       const loadedTests = saved || [];
       if (saved) setTests(loadedTests);
 
+      // ── Restore session (survives refresh) ──
+      const savedSession = sessionGet("session");
+      if (savedSession?.user) {
+        const { user: su, page: sp, activeTestId, submission: sub } = savedSession;
+        setUser(su);
+        if (sp === "test" && activeTestId) {
+          const test = loadedTests.find(t => t.id === activeTestId);
+          if (test) { setActiveTest(test); setPage("test"); return; }
+        }
+        if (sp === "results" && activeTestId && sub) {
+          const test = loadedTests.find(t => t.id === activeTestId);
+          if (test) { setActiveTest(test); setSubmission(sub); setPage("results"); return; }
+        }
+        setPage(su.role === ROLES.STUDENT ? "student" : "admin");
+        return;
+      }
+
       const testId = getUrlParam("testId");
       const resultId = getUrlParam("result");
       const resultStudent = getUrlParam("student");
@@ -154,12 +199,42 @@ export default function App() {
 
   const saveTests = async (t) => { setTests(t); await dbSet("tests", t); };
 
+  // Persist session state to sessionStorage whenever it changes
+  useEffect(() => {
+    if (user && page !== "login" && page !== "shared-result") {
+      sessionSet("session", {
+        user,
+        page,
+        activeTestId: activeTest?.id || null,
+        submission: page === "results" ? submission : null,
+      });
+    }
+  }, [user, page, activeTest, submission]);
+
+  const doLogout = () => {
+    sessionDel("session");
+    setUser(null);
+    setActiveTest(null);
+    setSubmission(null);
+    setPage("login");
+  };
+
   const login = async (role, name) => {
     setUser({ role, name });
     if (role === ROLES.STUDENT && directTestId) {
       const saved = await dbGet("tests");
       const test = (saved || []).find(t => t.id === directTestId);
       if (test) {
+        // Check if student already submitted this test
+        const allResults = await dbGet("all-results") || {};
+        const key = `${test.id}__${name}`;
+        if (allResults[key]) {
+          // Already submitted — show their existing result instead
+          setActiveTest(test);
+          setSubmission(allResults[key]);
+          setPage("results");
+          return;
+        }
         setActiveTest(test);
         setPage("test");
         return;
@@ -172,18 +247,21 @@ export default function App() {
     setSubmission(sub);
     const allResults = await dbGet("all-results") || {};
     const key = `${activeTest.id}__${user.name}`;
-    allResults[key] = sub;
-    await dbSet("all-results", allResults);
+    // Only save if this is the FIRST submission (first attempt only counts)
+    if (!allResults[key]) {
+      allResults[key] = sub;
+      await dbSet("all-results", allResults);
+    }
     setPage("results");
   };
 
   if (page === "shared-result") return <SharedResultScreen data={directResult} />;
   if (page === "login") return <LoginScreen onLogin={login} tests={tests} directTestId={directTestId} />;
-  if (page === "admin") return <AdminScreen user={user} tests={tests} onSaveTests={saveTests} onLogout={() => { setUser(null); setPage("login"); }} />;
+  if (page === "admin") return <AdminScreen user={user} tests={tests} onSaveTests={saveTests} onLogout={doLogout} />;
   if (page === "student") return (
     <StudentScreen user={user} tests={tests}
       onStart={(test) => { setActiveTest(test); setPage("test"); }}
-      onLogout={() => { setUser(null); setPage("login"); }} />
+      onLogout={doLogout} />
   );
   if (page === "test") return (
     <TestScreen test={activeTest} student={user} onSubmit={handleSubmit} />
@@ -303,7 +381,7 @@ function LoginScreen({ onLogin, tests, directTestId }) {
 ───────────────────────────────────────────── */
 function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [view, setView] = useState("dashboard");
-  const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
+  const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey:"", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
   const [paperFile, setPaperFile] = useState(null);
   const [keyFile, setKeyFile] = useState(null);
   const [status, setStatus] = useState("");
@@ -366,15 +444,15 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
     try {
       if (form.mode === "upload") {
         if (paperFile) {
-          setStatus("Parsing question paper...");
+          setStatus("Parsing question paper with Gemini...");
           const b64 = await toBase64(paperFile);
-          const res = await parsePDF(b64, false);
+          const res = await parsePDF(b64, false, form.geminiApiKey);
           if (res?.questions?.length) questions = res.questions;
         }
         if (keyFile) {
-          setStatus("Parsing answer key...");
+          setStatus("Parsing answer key with Gemini...");
           const b64 = await toBase64(keyFile);
-          const res = await parsePDF(b64, true);
+          const res = await parsePDF(b64, true, form.geminiApiKey);
           if (res?.answers) {
             const map = {}; res.answers.forEach(a=>map[a.q]=a.correct);
             questions = questions.map(q=>({ ...q, correct: map[q.id]??q.correct }));
@@ -384,11 +462,11 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         if (!form.driveApiKey || !form.drivePaperFileId) { setStatus("Enter Drive API key and File IDs"); setLoading(false); return; }
         setStatus("Fetching from Google Drive...");
         const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
-        const parsed = await parsePDF(paperB64, false);
+        const parsed = await parsePDF(paperB64, false, form.geminiApiKey);
         if (parsed?.questions?.length) questions = parsed.questions;
         if (form.driveKeyFileId) {
           const keyB64 = await fetchDriveFile(form.driveKeyFileId, form.driveApiKey);
-          const keyRes = await parsePDF(keyB64, true);
+          const keyRes = await parsePDF(keyB64, true, form.geminiApiKey);
           if (keyRes?.answers) {
             const map={}; keyRes.answers.forEach(a=>map[a.q]=a.correct);
             questions = questions.map(q=>({ ...q, correct: map[q.id]??q.correct }));
@@ -414,7 +492,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
     setStatus("Test created!");
     setLoading(false);
     setView("dashboard");
-    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
+    setForm({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", geminiApiKey:"", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
     setPaperFile(null); setKeyFile(null);
   };
 
@@ -435,7 +513,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         <span style={{ color:"#e8c97e", fontWeight:800, fontSize:17, letterSpacing:1 }}>🎯 TestForge</span>
         <span style={{ color:"rgba(255,255,255,0.4)", fontSize:12 }}>Admin Panel</span>
         <div style={{ marginLeft:"auto", display:"flex", gap:12, alignItems:"center" }}>
-          {[["dashboard","Dashboard"],["create","New Test"],["students","Students"]].map(([v,l])=>(
+          {[["dashboard","Dashboard"],["create","New Test"],["students","Students"],["results","📊 Results"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)}
               style={{ padding:"7px 16px", borderRadius:8, border:"none", cursor:"pointer", fontFamily:"inherit", fontSize:13, fontWeight:700,
                 background: view===v ? "#e8c97e" : "rgba(255,255,255,0.08)", color: view===v ? "#1a1a2e" : "rgba(255,255,255,0.7)" }}>
@@ -508,6 +586,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               })}
             </div>
           </>
+        )}
+
+        {view === "results" && (
+          <AdminResultsView tests={tests} />
         )}
 
         {view === "students" && (
@@ -605,6 +687,16 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               </div>
             </div>
 
+            {(form.mode === "upload" || form.mode === "drive") && (
+              <div style={{ marginTop:20, background:"#fffde7", borderRadius:12, padding:16, border:"1px solid #ffe082" }}>
+                <Label>🤖 Gemini API Key (required to parse PDFs)</Label>
+                <Input value={form.geminiApiKey} onChange={v=>setForm(f=>({...f,geminiApiKey:v}))} placeholder="AIzaSy... (from Google AI Studio)" />
+                <div style={{ fontSize:11, color:"#a07800", marginTop:6 }}>
+                  Get free key at <b>aistudio.google.com</b> → Get API Key. Leave blank to use demo questions.
+                </div>
+              </div>
+            )}
+
             {form.mode === "upload" && (
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginTop:20 }}>
                 {[["Question Paper PDF", paperRef, paperFile, setPaperFile],["Answer Key PDF", keyRef, keyFile, setKeyFile]].map(([lbl,ref,file,setter])=>(
@@ -667,6 +759,122 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 }
 
 /* ─────────────────────────────────────────────
+   ADMIN RESULTS VIEW  (marks visible to admin/teacher)
+───────────────────────────────────────────── */
+function AdminResultsView({ tests }) {
+  const [allResults, setAllResults] = useState({});
+  const [selectedTest, setSelectedTest] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const r = await dbGet("all-results") || {};
+      setAllResults(r);
+      if (tests.length > 0) setSelectedTest(tests[0]);
+    })();
+  }, [tests]);
+
+  if (tests.length === 0) return (
+    <div style={{ background:"white", borderRadius:16, padding:48, textAlign:"center", color:"#bbb", boxShadow:"0 2px 10px rgba(0,0,0,0.06)" }}>
+      <div style={{ fontSize:48, marginBottom:12 }}>📭</div>
+      <div>No tests created yet.</div>
+    </div>
+  );
+
+  const testEntries = selectedTest
+    ? Object.entries(allResults).filter(([k]) => k.startsWith(selectedTest.id + "__"))
+    : [];
+
+  return (
+    <div>
+      <h2 style={{ margin:"0 0 20px", color:"#1a1a2e", fontSize:20 }}>📊 Student Results & Marks</h2>
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:24 }}>
+        {tests.map(t => (
+          <button key={t.id} onClick={() => setSelectedTest(t)}
+            style={{ padding:"9px 18px", borderRadius:10, border:`2px solid ${selectedTest?.id===t.id?"#e8c97e":"#e0e0e0"}`,
+              background: selectedTest?.id===t.id ? "#fffde7" : "white",
+              color: selectedTest?.id===t.id ? "#7c6a00" : "#555",
+              fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"Georgia, serif" }}>
+            {t.title}
+          </button>
+        ))}
+      </div>
+
+      {selectedTest && (
+        <div style={{ background:"white", borderRadius:16, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", overflow:"hidden" }}>
+          <div style={{ padding:"16px 24px", borderBottom:"1px solid #f0f0f0", background:"#f8f9ff" }}>
+            <div style={{ fontWeight:800, fontSize:15, color:"#1a1a2e" }}>{selectedTest.title}</div>
+            <div style={{ fontSize:12, color:"#888", marginTop:3 }}>{selectedTest.questions?.length||0} Questions — {testEntries.length} submission(s)</div>
+          </div>
+
+          {testEntries.length === 0 ? (
+            <div style={{ padding:40, textAlign:"center", color:"#bbb" }}>
+              <div style={{ fontSize:36, marginBottom:8 }}>📋</div>
+              <div>No submissions yet for this test.</div>
+            </div>
+          ) : (
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:14 }}>
+              <thead>
+                <tr style={{ background:"#f4f6fb" }}>
+                  {["#","Student Name","Score","Marks","Correct","Wrong","Skipped","Time Taken"].map(h => (
+                    <th key={h} style={{ padding:"12px 16px", textAlign:"left", fontWeight:700, color:"#555", fontSize:12, borderBottom:"2px solid #e8eaf6" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {testEntries.sort((a,b) => {
+                  // Sort by score desc
+                  const scoreOf = ([,sub]) => {
+                    const qs = selectedTest.questions || DEMO_QUESTIONS;
+                    return qs.reduce((acc,q,i) => {
+                      const given = sub.answers[i];
+                      const blank = given===undefined||given===null||given===""||( typeof given==="number"&&isNaN(given));
+                      const correct = !blank && String(given)===String(q.correct);
+                      const wrong = !blank && !correct;
+                      return acc + (correct?q.marks:wrong?q.negative:0);
+                    }, 0);
+                  };
+                  return scoreOf(b) - scoreOf(a);
+                }).map(([key, sub], rowIdx) => {
+                  const studentName = key.replace(selectedTest.id + "__", "");
+                  const qs = selectedTest.questions || DEMO_QUESTIONS;
+                  let score=0, maxM=0, nC=0, nW=0, nS=0;
+                  qs.forEach((q,i) => {
+                    const given = sub.answers[i];
+                    const blank = given===undefined||given===null||given===""||( typeof given==="number"&&isNaN(given));
+                    const correct = !blank && String(given)===String(q.correct);
+                    const wrong = !blank && !correct;
+                    maxM += q.marks;
+                    if (correct) { score += q.marks; nC++; }
+                    else if (wrong) { score += q.negative; nW++; }
+                    else nS++;
+                  });
+                  const pct = Math.max(0, Math.round((score/maxM)*100));
+                  const pctC = pct>=70?"#2e7d32":pct>=40?"#f57c00":"#e53935";
+                  return (
+                    <tr key={key} style={{ borderBottom:"1px solid #f5f5f5", background: rowIdx%2===0?"white":"#fafbff" }}>
+                      <td style={{ padding:"12px 16px", color:"#aaa", fontWeight:700 }}>{rowIdx+1}</td>
+                      <td style={{ padding:"12px 16px", fontWeight:700, color:"#1a1a2e" }}>{studentName}</td>
+                      <td style={{ padding:"12px 16px" }}>
+                        <span style={{ fontWeight:800, color:pctC, fontSize:16 }}>{pct}%</span>
+                      </td>
+                      <td style={{ padding:"12px 16px", fontWeight:700 }}>{score}/{maxM}</td>
+                      <td style={{ padding:"12px 16px", color:"#43a047", fontWeight:700 }}>{nC}</td>
+                      <td style={{ padding:"12px 16px", color:"#e53935", fontWeight:700 }}>{nW}</td>
+                      <td style={{ padding:"12px 16px", color:"#9e9e9e", fontWeight:700 }}>{nS}</td>
+                      <td style={{ padding:"12px 16px", color:"#555" }}>{fmt(sub.timeTaken || 0)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
    STUDENT PASSWORD ROW
 ───────────────────────────────────────────── */
 function StudentPasswordRow({ sp, onRemove, onUpdate }) {
@@ -715,6 +923,19 @@ function StudentScreen({ user, tests, onStart, onLogout }) {
   const available = tests.filter(t => getTestStatus(t) === TEST_STATUS.LIVE);
   const upcoming = tests.filter(t => getTestStatus(t) === TEST_STATUS.SCHEDULED);
   const ended = tests.filter(t => getTestStatus(t) === TEST_STATUS.ENDED);
+  const [submittedIds, setSubmittedIds] = useState(new Set());
+
+  useEffect(() => {
+    (async () => {
+      const allResults = await dbGet("all-results") || {};
+      const ids = new Set(
+        Object.keys(allResults)
+          .filter(k => k.endsWith("__" + user.name))
+          .map(k => k.replace("__" + user.name, ""))
+      );
+      setSubmittedIds(ids);
+    })();
+  }, [user.name]);
 
   return (
     <div style={{ minHeight:"100vh", background:"#f4f6fb", fontFamily:"Georgia, serif" }}>
@@ -734,7 +955,12 @@ function StudentScreen({ user, tests, onStart, onLogout }) {
         <Section title="Available Now" count={available.length} color="#e53935">
           {available.length === 0 ? <Empty text="No live tests right now" /> : available.map(test => (
             <TestCard key={test.id} test={test} status={TEST_STATUS.LIVE}
-              action={<button onClick={()=>onStart(test)} style={{ padding:"10px 22px", borderRadius:10, border:"none", background:"linear-gradient(135deg,#e53935,#c62828)", color:"white", fontWeight:800, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Start Test</button>} />
+              action={
+                submittedIds.has(test.id)
+                  ? <span style={{ padding:"10px 18px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontWeight:700, fontSize:13 }}>✅ Submitted</span>
+                  : <button onClick={()=>onStart(test)} style={{ padding:"10px 22px", borderRadius:10, border:"none", background:"linear-gradient(135deg,#e53935,#c62828)", color:"white", fontWeight:800, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Start Test</button>
+              } />
+          ))}
           ))}
         </Section>
 
@@ -798,12 +1024,24 @@ const Q_COLORS = { nv:"#9e9e9e", na:"#e53935", ans:"#43a047", mr:"#7b1fa2", amr:
 
 function TestScreen({ test, student, onSubmit }) {
   const qs = test.questions || DEMO_QUESTIONS;
-  const [idx, setIdx] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const [intInputs, setIntInputs] = useState({});
-  const [qStatus, setQStatus] = useState(() => { const s={}; qs.forEach((_,i)=>s[i]=i===0?Q_STATUS.NA:Q_STATUS.NV); return s; });
-  const [timeLeft, setTimeLeft] = useState((test.durationMins||180)*60);
+  const draftKey = `draft__${test.id}__${student.name}`;
+
+  // Restore draft from sessionStorage on mount
+  const savedDraft = sessionGet(draftKey) || {};
+  const [idx, setIdx] = useState(savedDraft.idx ?? 0);
+  const [answers, setAnswers] = useState(savedDraft.answers || {});
+  const [intInputs, setIntInputs] = useState(savedDraft.intInputs || {});
+  const [qStatus, setQStatus] = useState(() => {
+    if (savedDraft.qStatus) return savedDraft.qStatus;
+    const s={}; qs.forEach((_,i)=>s[i]=i===0?Q_STATUS.NA:Q_STATUS.NV); return s;
+  });
+  const [timeLeft, setTimeLeft] = useState(savedDraft.timeLeft ?? (test.durationMins||180)*60);
   const [confirm, setConfirm] = useState(false);
+
+  // Auto-save draft to sessionStorage on every state change
+  useEffect(() => {
+    sessionSet(draftKey, { idx, answers, intInputs, qStatus, timeLeft });
+  }, [idx, answers, intInputs, qStatus, timeLeft]);
 
   useEffect(() => {
     const t = setInterval(()=>setTimeLeft(p=>{ if(p<=1){ clearInterval(t); doSubmit(); return 0; } return p-1; }), 1000);
@@ -824,6 +1062,7 @@ function TestScreen({ test, student, onSubmit }) {
   const doSubmit = () => {
     const finalAns = {};
     qs.forEach((q,i) => { finalAns[i] = q.type==="integer" ? parseFloat(intInputs[i]) : answers[i]; });
+    sessionDel(draftKey); // Clear saved draft after submission
     onSubmit({ answers:finalAns, qStatuses:qStatus, timeTaken:(test.durationMins||180)*60 - timeLeft });
   };
 
