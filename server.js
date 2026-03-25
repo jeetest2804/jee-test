@@ -37,26 +37,33 @@ app.post("/api/parse-pdf", async (req, res) => {
 
   const prompt = isKey
     ? `Extract answer key from this JEE PDF. Return ONLY valid JSON — no markdown, no extra text:
-{"answers":[{"q":1,"correct":"B","type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
+{"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
 Rules:
-- For MCQ questions: correct is the letter "A", "B", "C" or "D"
-- For integer questions: correct is the number itself
-- Include every question that has an answer`
+- For MCQ: correct is the 0-based index of the correct option (0=A, 1=B, 2=C, 3=D)
+- For integer: correct is the numeric answer itself
+- Include every question that has an answer
+- Output pure JSON only, no explanation`
     : `Extract ALL questions from this JEE exam PDF. Return ONLY valid JSON — no markdown, no extra text:
-{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"full question text","options":["A) option1","B) option2","C) option3","D) option4"],"marks":4,"negative":-1}]}
+{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"full question text here","options":["option1 text","option2 text","option3 text","option4 text"],"correct":2,"marks":4,"negative":-1}]}
 Rules:
-- subject must be exactly "Physics", "Chemistry" or "Mathematics"
-- type is "mcq" (4 options) or "integer" (no options, options=[])
-- Include ALL questions found in the PDF
-- Do not skip any question`;
+- subject must be exactly one of: "Physics", "Chemistry", "Mathematics"
+- type is "mcq" for 4-option questions, or "integer" for numeric answer (set options=[])
+- For MCQ: correct is the 0-based index of the correct option (0=A, 1=B, 2=C, 3=D)
+- For integer: correct is the numeric answer
+- options must contain plain text only — NO "A)" "B)" prefixes
+- marks is typically 4, negative is typically -1 for MCQ and 0 for integer
+- Extract EVERY question in the PDF, do not skip any
+- Output pure JSON only, no explanation`;
 
   try {
-    // Try gemini-1.5-flash first, fallback to gemini-1.5-pro
-    const models = ["gemini-1.5-flash", "gemini-1.5-pro"];
+    // Try models in order: flash is faster/cheaper, pro is more capable
+    const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"];
     let lastError = null;
 
     for (const model of models) {
       try {
+        console.log(`[Gemini] Trying model: ${model}, isKey=${isKey}, base64 length=${base64.length}`);
+
         const geminiRes = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
           {
@@ -79,7 +86,8 @@ Rules:
               generationConfig: {
                 temperature: 0.1,
                 maxOutputTokens: 8192,
-                responseMimeType: "application/json",
+                // NOTE: Do NOT set responseMimeType here — it changes the
+                // response structure and breaks text extraction.
               },
             }),
           }
@@ -87,44 +95,80 @@ Rules:
 
         if (!geminiRes.ok) {
           const errBody = await geminiRes.text();
-          lastError = `Gemini ${model} error ${geminiRes.status}: ${errBody}`;
-          console.error(lastError);
-          continue; // try next model
+          lastError = `Gemini ${model} HTTP ${geminiRes.status}: ${errBody}`;
+          console.error(`[Gemini] ${lastError}`);
+          continue;
         }
 
         const data = await geminiRes.json();
-        let txt =
-          data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        console.log(`[Gemini] Raw response keys:`, Object.keys(data));
 
-        // Strip markdown fences if any
-        txt = txt.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+        // Extract the text content
+        let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        console.log(`[Gemini] Raw text (first 300 chars):`, txt.slice(0, 300));
 
-        // Try to extract JSON if wrapped in extra text
-        const jsonMatch = txt.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          lastError = "Gemini returned no JSON object. Raw: " + txt.slice(0, 200);
+        if (!txt) {
+          // Check for safety blocks or empty candidates
+          const finishReason = data.candidates?.[0]?.finishReason;
+          lastError = `Gemini ${model} returned empty text. finishReason=${finishReason}`;
+          console.error(`[Gemini] ${lastError}`);
           continue;
         }
 
+        // Strip markdown code fences if present
+        txt = txt
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/\s*```$/i, "")
+          .trim();
+
+        // Find the outermost JSON object
+        const start = txt.indexOf("{");
+        const end = txt.lastIndexOf("}");
+        if (start === -1 || end === -1) {
+          lastError = `Gemini ${model}: No JSON object found. Raw: ${txt.slice(0, 300)}`;
+          console.error(`[Gemini] ${lastError}`);
+          continue;
+        }
+
+        const jsonStr = txt.slice(start, end + 1);
         let parsed;
         try {
-          parsed = JSON.parse(jsonMatch[0]);
+          parsed = JSON.parse(jsonStr);
         } catch (parseErr) {
-          lastError = "JSON parse failed: " + parseErr.message + " Raw: " + txt.slice(0, 200);
+          lastError = `Gemini ${model}: JSON parse failed — ${parseErr.message}. Raw: ${jsonStr.slice(0, 300)}`;
+          console.error(`[Gemini] ${lastError}`);
           continue;
         }
 
+        // Validate the parsed result has expected shape
+        if (!isKey && (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0)) {
+          lastError = `Gemini ${model}: questions array is empty or missing. Got keys: ${Object.keys(parsed)}`;
+          console.error(`[Gemini] ${lastError}`);
+          continue;
+        }
+        if (isKey && (!parsed.answers || !Array.isArray(parsed.answers) || parsed.answers.length === 0)) {
+          lastError = `Gemini ${model}: answers array is empty or missing. Got keys: ${Object.keys(parsed)}`;
+          console.error(`[Gemini] ${lastError}`);
+          continue;
+        }
+
+        console.log(`[Gemini] ✅ Success with ${model}! Items: ${isKey ? parsed.answers?.length : parsed.questions?.length}`);
         return res.status(200).json({ ok: true, data: parsed });
+
       } catch (fetchErr) {
         lastError = `Fetch error for ${model}: ${fetchErr.message}`;
+        console.error(`[Gemini] ${lastError}`);
         continue;
       }
     }
 
     // All models failed
+    console.error("[Gemini] All models failed. Last error:", lastError);
     return res.status(502).json({ error: lastError || "All Gemini models failed" });
+
   } catch (err) {
-    console.error("Server error:", err);
+    console.error("[Gemini] Unexpected server error:", err);
     return res.status(500).json({ error: "Server error: " + err.message });
   }
 });
