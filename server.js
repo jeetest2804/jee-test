@@ -70,8 +70,7 @@ Rules:
   const ALL_MODELS = [
     "gemini-2.0-flash",           // FREE — 1500 req/day — most reliable
     "gemini-2.0-flash-lite",      // FREE — 1500 req/day — faster/lighter
-    "gemini-1.5-flash",           // FREE — 1500 req/day — stable
-    "gemini-1.5-flash-8b",        // FREE — 1500 req/day — smallest/fastest
+    "gemini-1.5-flash",           // FREE — fallback (may be deprecated)
   ];
   const primary = requestedModel && ALL_MODELS.includes(requestedModel)
     ? requestedModel
