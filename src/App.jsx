@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 /* ─────────────────────────────────────────────
    STORAGE  (persists across sessions)
@@ -143,11 +143,11 @@ function renderMath(text) {
    pdfBase64 is stored in window.__pdfBase64 after upload
 ══════════════════════════════════════════ */
 function PageImageFigure({ pageNumber, compact, label }) {
-  const [imgSrc, setImgSrc] = React.useState(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState(false);
+  const [imgSrc, setImgSrc] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!pageNumber) { setLoading(false); setError(true); return; }
     const pdfBase64 = window.__pdfBase64;
     if (!pdfBase64) { setLoading(false); setError(true); return; }
