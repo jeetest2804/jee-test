@@ -142,83 +142,37 @@ function renderMath(text) {
    REAL PAGE IMAGE — fetches actual PDF page
    pdfBase64 is stored in window.__pdfBase64 after upload
 ══════════════════════════════════════════ */
-function PageImageFigure({ pageNumber, compact, label }) {
-  const [imgSrc, setImgSrc] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+function PageImageFigure({ imageData, pageNumber, compact, label }) {
+  // imageData is a base64 PNG already embedded in the question object at creation time
+  // pageNumber is kept as fallback label only
+  const w = compact ? 260 : 420;
 
-  useEffect(() => {
-    if (!pageNumber) { setLoading(false); setError(true); return; }
-    const pdfBase64 = window.__pdfBase64;
-    if (!pdfBase64) { setLoading(false); setError(true); return; }
-
-    let cancelled = false;
-    setLoading(true);
-    setError(false);
-
-    fetch("/api/page-image", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base64: pdfBase64, page: pageNumber }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (cancelled) return;
-        if (data.ok && data.image) setImgSrc(`data:image/png;base64,${data.image}`);
-        else setError(true);
-        setLoading(false);
-      })
-      .catch(() => { if (!cancelled) { setError(true); setLoading(false); } });
-
-    return () => { cancelled = true; };
-  }, [pageNumber]);
-
-  const w = compact ? 260 : 380;
-  const containerStyle = {
-    border: "1.5px solid #1a237e",
-    borderRadius: compact ? 6 : 8,
-    overflow: "hidden",
-    background: "white",
-    display: "inline-block",
-    maxWidth: "100%",
-    verticalAlign: "top",
-  };
-  const headerStyle = {
-    background: "#1a237e",
-    color: "white",
-    padding: compact ? "3px 8px" : "5px 12px",
-    fontSize: compact ? 9 : 11,
-    fontWeight: 700,
-    letterSpacing: 0.4,
-    display: "flex",
-    alignItems: "center",
-    gap: 5,
-  };
+  if (!imageData) {
+    // No image data — show a clean placeholder
+    return (
+      <div style={{
+        border: "1.5px dashed #bbb", borderRadius: compact ? 6 : 8,
+        display: "inline-block", padding: compact ? "8px 14px" : "12px 20px",
+        color: "#999", fontSize: compact ? 10 : 12, fontStyle: "italic",
+        background: "#fafafa", verticalAlign: "top",
+      }}>
+        📊 Figure{pageNumber ? ` (page ${pageNumber})` : ""}
+      </div>
+    );
+  }
 
   return (
-    <div style={containerStyle}>
-      <div style={headerStyle}>
-        <span>🖼️</span> {label || "FIGURE"} {pageNumber ? `(p.${pageNumber})` : ""}
-      </div>
-      <div style={{ padding: compact ? "4px 6px" : "8px 12px", textAlign: "center", minHeight: 60, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        {loading && (
-          <div style={{ color: "#666", fontSize: compact ? 10 : 12 }}>
-            <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⏳</span> Loading diagram...
-          </div>
-        )}
-        {!loading && error && (
-          <div style={{ color: "#999", fontSize: compact ? 9 : 11, fontStyle: "italic" }}>
-            [Figure on page {pageNumber}]
-          </div>
-        )}
-        {!loading && imgSrc && (
-          <img
-            src={imgSrc}
-            alt={`Figure from page ${pageNumber}`}
-            style={{ maxWidth: w, width: "100%", height: "auto", display: "block" }}
-          />
-        )}
-      </div>
+    <div style={{
+      border: "2px solid #1a237e", borderRadius: compact ? 6 : 8,
+      overflow: "hidden", background: "white",
+      display: "inline-block", maxWidth: "100%", verticalAlign: "top",
+      boxShadow: "0 2px 8px rgba(26,35,126,0.12)",
+    }}>
+      <img
+        src={`data:image/png;base64,${imageData}`}
+        alt={label || "Figure"}
+        style={{ maxWidth: w, width: "100%", height: "auto", display: "block" }}
+      />
     </div>
   );
 }
@@ -635,26 +589,21 @@ function FigureBox({ desc, compact }) {
   );
 }
 
-// New: render question text supporting both [FIGURE] (new) and [FIGURE: desc] (legacy)
-function renderQuestionText(text, compact, figurePageNumber) {
+// Render question text: supports [FIGURE], [FIGURE_A/B/C/D], and legacy [FIGURE: desc]
+function renderQuestionText(text, compact, figurePageNumber, figureImageData) {
   if (!text) return null;
-  // Split on both new [FIGURE] / [FIGURE_X] and legacy [FIGURE: description]
   const parts = text.split(/(\[FIGURE(?:_[ABCD])?\]|\[FIGURE:[^\]]+\])/gi);
   return parts.map((part, i) => {
-    // New format: [FIGURE] — show real PDF page image
     if (/^\[FIGURE\]$/i.test(part)) {
-      return <PageImageFigure key={i} pageNumber={figurePageNumber} compact={compact} label="FIGURE" />;
+      return <PageImageFigure key={i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label="Figure" />;
     }
-    // New format: [FIGURE_A] etc (option is a diagram — show inline)
     const optMatch = part.match(/^\[FIGURE_([ABCD])\]$/i);
     if (optMatch) {
-      return <PageImageFigure key={i} pageNumber={figurePageNumber} compact={compact} label={`Graph ${optMatch[1]}`} />;
+      return <PageImageFigure key={i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label={`Option ${optMatch[1]}`} />;
     }
-    // Legacy format: [FIGURE: description] — use old SVG renderer as fallback
     const legacyMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
     if (legacyMatch) {
-      const desc = legacyMatch[1].trim();
-      return <FigureBox key={i} desc={desc} compact={compact} />;
+      return <FigureBox key={i} desc={legacyMatch[1].trim()} compact={compact} />;
     }
     const mathRendered = renderMath(part);
     if (!mathRendered) return null;
@@ -1076,6 +1025,51 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
     await saveStudentPasswords(updated);
   };
 
+
+/* ─────────────────────────────────────────────
+   EMBED FIGURE IMAGES INTO QUESTIONS
+   Called after questions are extracted.
+   For every question with hasFigure=true, fetches the PDF page image
+   from the server and stores it as figureImageData (base64 PNG) directly
+   in the question object. This way images are always available.
+───────────────────────────────────────────── */
+async function embedFigureImages(questions, pdfBase64, onProgress) {
+  // Collect unique page numbers needed
+  const pages = [...new Set(
+    questions.filter(q => q.hasFigure && q.figurePageNumber).map(q => q.figurePageNumber)
+  )];
+  if (pages.length === 0) return questions;
+
+  const pageImages = {};
+  let done = 0;
+  // Fetch all pages in parallel (max 5 at a time to avoid overload)
+  const BATCH = 5;
+  for (let i = 0; i < pages.length; i += BATCH) {
+    const batch = pages.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (page) => {
+      try {
+        const res = await fetch("/api/page-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base64: pdfBase64, page }),
+        });
+        const data = await res.json();
+        if (data.ok && data.image) pageImages[page] = data.image;
+      } catch {}
+      done++;
+      if (onProgress) onProgress(done, pages.length);
+    }));
+  }
+
+  // Embed image data into each question
+  return questions.map(q => {
+    if (q.hasFigure && q.figurePageNumber && pageImages[q.figurePageNumber]) {
+      return { ...q, figureImageData: pageImages[q.figurePageNumber] };
+    }
+    return q;
+  });
+}
+
   const updateStudentPassword = async (name, newPass) => {
     const updated = studentPasswords.map(s => s.name === name ? { ...s, password: newPass } : s);
     await saveStudentPasswords(updated);
@@ -1157,6 +1151,14 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
           }
           questions = allQs;
           geminiUsed = true;
+          setMsg(`✅ All sections done! Now loading diagrams...`, "info");
+          // Use the last b64 — for separate mode, pages are per-file so we store per-section
+          // We use window.__pdfBase64 which is set to last uploaded section
+          if (window.__pdfBase64) {
+            questions = await embedFigureImages(questions, window.__pdfBase64, (done, total) => {
+              setMsg(`🖼️ Loading diagram images... (${done}/${total})`, "info");
+            });
+          }
           setMsg(`✅ All sections done! Total: ${questions.length} questions`, "success");
 
         // ── COMBINED PDF MODE ──
@@ -1171,6 +1173,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
               questions = normalizeQs(res.questions);
               geminiUsed = true;
               const warnMsg = res.warning ? ` ⚠️ Warning: ${res.warning}` : "";
+              setMsg(`✅ Extracted ${questions.length} questions! Now loading diagrams...`, "info");
+              questions = await embedFigureImages(questions, b64, (done, total) => {
+                setMsg(`🖼️ Loading diagram images... (${done}/${total})`, "info");
+              });
               setMsg(`✅ Extracted ${questions.length} questions!${warnMsg}`, "success");
             } else {
               setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually.", "error");
@@ -1226,6 +1232,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
               };
             });
             geminiUsed = true;
+            setMsg(`✅ Extracted ${questions.length} questions! Now loading diagrams...`, "info");
+            questions = await embedFigureImages(questions, paperB64, (done, total) => {
+              setMsg(`🖼️ Loading diagram images... (${done}/${total})`, "info");
+            });
           } else {
             setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs.", "error");
             setLoading(false);
@@ -2503,7 +2513,7 @@ function TestScreen({ test, student, onSubmit }) {
           <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
             <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
               <div style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
-                {renderQuestionText(cur.text, false, cur.figurePageNumber)}
+                {renderQuestionText(cur.text, false, cur.figurePageNumber, cur.figureImageData)}
               </div>
             </div>
 
@@ -2525,7 +2535,7 @@ function TestScreen({ test, student, onSubmit }) {
                         {["A","B","C","D"][oi]}
                       </div>
                       <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                        {renderQuestionText(opt, true, cur.figurePageNumber)}
+                        {renderQuestionText(opt, true, cur.figurePageNumber, cur.figureImageData)}
                       </span>
                     </div>
                   );
@@ -2843,13 +2853,13 @@ function ResultsScreen({ test, student, submission, onBack }) {
               </div>
               {expanded===i && (
                 <div style={{ padding:"0 18px 18px", borderTop:`1px solid ${border}` }}>
-                  <div style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{renderQuestionText(r.text, false, r.figurePageNumber)}</div>
+                  <div style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{renderQuestionText(r.text, false, r.figurePageNumber, r.figureImageData)}</div>
                   {r.type==="mcq" ? r.options.map((opt,oi)=>(
                     <div key={oi} style={{ padding:"8px 12px", borderRadius:8, marginBottom:6, fontSize:13,
                       background:String(r.correct)===String(oi)?"#c8e6c9":String(r.given)===String(oi)?"#ffcdd2":"white",
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
-                      {["A","B","C","D"][oi]}) {renderQuestionText(opt, true, r.figurePageNumber)}
+                      {["A","B","C","D"][oi]}) {renderQuestionText(opt, true, r.figurePageNumber, r.figureImageData)}
                       {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
                       {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
