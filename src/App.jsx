@@ -167,37 +167,18 @@ function renderQuestionText(text) {
           }}>
             <span>📊</span> FIGURE / DIAGRAM
           </div>
-          {/* Figure description box */}
+          {/* Figure description — this IS the diagram content extracted by AI */}
           <div style={{
-            padding: "16px 20px",
+            padding: "14px 18px",
             background: "white",
-            minHeight: 80,
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
           }}>
-            {/* Visual representation hint */}
             <div style={{
-              background: "#e8eaf6",
-              borderRadius: 6,
-              padding: "10px 14px",
-              border: "1px dashed #5c6bc0",
-              textAlign: "center",
-              color: "#5c6bc0",
-              fontSize: 12,
-              fontWeight: 600,
-            }}>
-              📐 [Diagram extracted from PDF]
-            </div>
-            {/* Description */}
-            <div style={{
-              fontSize: 13,
-              color: "#333",
-              lineHeight: 1.7,
+              fontSize: 13.5,
+              color: "#222",
+              lineHeight: 1.8,
               fontFamily: "Georgia, serif",
-              fontStyle: "italic",
               borderLeft: "3px solid #1a237e",
-              paddingLeft: 12,
+              paddingLeft: 14,
             }}>
               {renderMath(desc)}
             </div>
@@ -439,8 +420,14 @@ export default function App() {
   if (page === "admin") return <AdminScreen user={user} tests={tests} onSaveTests={saveTests} onLogout={doLogout} serverReady={serverReady} />;
   if (page === "student") return (
     <StudentScreen user={user} tests={tests}
-      onStart={(test) => { setActiveTest(test); setPage("test"); }}
+      onStart={(test) => { setActiveTest(test); setPage("instructions"); }}
+      onViewResult={(test, sub) => { setActiveTest(test); setSubmission(sub); setPage("results"); }}
       onLogout={doLogout} serverReady={serverReady} />
+  );
+  if (page === "instructions") return (
+    <InstructionsScreen test={activeTest} student={user}
+      onProceed={() => setPage("test")}
+      onBack={() => setPage("student")} />
   );
   if (page === "test") return (
     <TestScreen test={activeTest} student={user} onSubmit={handleSubmit} />
@@ -1548,23 +1535,28 @@ function StudentPasswordRow({ sp, onRemove, onUpdate }) {
 /* ─────────────────────────────────────────────
    STUDENT SCREEN
 ───────────────────────────────────────────── */
-function StudentScreen({ user, tests, onStart, onLogout, serverReady }) {
+function StudentScreen({ user, tests, onStart, onLogout, serverReady, onViewResult }) {
   const available = tests.filter(t => getTestStatus(t) === TEST_STATUS.LIVE);
   const upcoming = tests.filter(t => getTestStatus(t) === TEST_STATUS.SCHEDULED);
   const ended = tests.filter(t => getTestStatus(t) === TEST_STATUS.ENDED);
   const [submittedIds, setSubmittedIds] = useState(new Set());
+  const [allResults, setAllResults] = useState({});
 
   useEffect(() => {
     (async () => {
-      const allResults = await dbGet("all-results") || {};
+      const r = await dbGet("all-results") || {};
+      setAllResults(r);
       const ids = new Set(
-        Object.keys(allResults)
+        Object.keys(r)
           .filter(k => k.endsWith("__" + user.name))
           .map(k => k.replace("__" + user.name, ""))
       );
       setSubmittedIds(ids);
     })();
   }, [user.name]);
+
+  // All tests the student has submitted
+  const submittedTests = tests.filter(t => submittedIds.has(t.id));
 
   return (
     <div style={{ minHeight:"100vh", background:"#f4f6fb", fontFamily:"Georgia, serif" }}>
@@ -1596,7 +1588,13 @@ function StudentScreen({ user, tests, onStart, onLogout, serverReady }) {
             <TestCard key={test.id} test={test} status={TEST_STATUS.LIVE}
               action={
                 submittedIds.has(test.id)
-                  ? <span style={{ padding:"10px 18px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontWeight:700, fontSize:13 }}>✅ Submitted</span>
+                  ? <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                      <span style={{ padding:"10px 18px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontWeight:700, fontSize:13 }}>✅ Submitted</span>
+                      <button onClick={() => onViewResult(test, allResults[`${test.id}__${user.name}`])}
+                        style={{ padding:"10px 16px", borderRadius:10, border:"1px solid #1a237e", background:"white", color:"#1a237e", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+                        📊 View Analysis
+                      </button>
+                    </div>
                   : <button onClick={()=>onStart(test)} style={{ padding:"10px 22px", borderRadius:10, border:"none", background:"linear-gradient(135deg,#e53935,#c62828)", color:"white", fontWeight:800, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>Start Test</button>
               } />
           ))}
@@ -1612,9 +1610,77 @@ function StudentScreen({ user, tests, onStart, onLogout, serverReady }) {
         <Section title="Completed" count={ended.length} color="#2e7d32">
           {ended.length === 0 ? <Empty text="No past tests" /> : ended.map(test => (
             <TestCard key={test.id} test={test} status={TEST_STATUS.ENDED}
-              action={<span style={{ color:"#888", fontSize:13 }}>Test ended</span>} />
+              action={
+                submittedIds.has(test.id)
+                  ? <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                      <span style={{ padding:"8px 14px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontWeight:700, fontSize:13 }}>✅ Submitted</span>
+                      <button onClick={() => onViewResult(test, allResults[`${test.id}__${user.name}`])}
+                        style={{ padding:"8px 14px", borderRadius:10, border:"1px solid #1a237e", background:"white", color:"#1a237e", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+                        📊 View Analysis
+                      </button>
+                    </div>
+                  : <span style={{ color:"#888", fontSize:13 }}>Test ended</span>
+              } />
           ))}
         </Section>
+
+        {/* Analysis Section — all submitted tests */}
+        {submittedTests.length > 0 && (
+          <Section title="📊 My Analysis" count={submittedTests.length} color="#1a237e">
+            {submittedTests.map(test => {
+              const sub = allResults[`${test.id}__${user.name}`];
+              if (!sub) return null;
+              const qs = test.questions || [];
+              const results = qs.map((q, i) => {
+                const given = sub.answers?.[i];
+                const blank = given === undefined || given === null || given === "" || (typeof given === "number" && isNaN(given));
+                const correct = !blank && String(given) === String(q.correct);
+                const wrong = !blank && !correct;
+                const qMarks = Number(q.marks) || 4;
+                const qNeg = q.negative !== undefined ? Number(q.negative) : -1;
+                return { correct, wrong, blank, earned: correct ? qMarks : wrong ? qNeg : 0, marks: qMarks };
+              });
+              const scored = results.reduce((s, r) => s + r.earned, 0);
+              const maxMarks = results.reduce((s, r) => s + r.marks, 0);
+              const nC = results.filter(r => r.correct).length;
+              const nW = results.filter(r => r.wrong).length;
+              const nS = results.filter(r => r.blank).length;
+              const pct = maxMarks > 0 ? Math.max(0, Math.round((scored / maxMarks) * 100)) : 0;
+              const scoreColor = pct >= 70 ? "#2e7d32" : pct >= 40 ? "#f57c00" : "#e53935";
+              return (
+                <div key={test.id} style={{ background:"white", borderRadius:16, padding:"18px 22px", marginBottom:12, boxShadow:"0 2px 10px rgba(0,0,0,0.06)" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
+                    <div>
+                      <div style={{ fontWeight:700, fontSize:15, color:"#1a1a2e" }}>{test.title}</div>
+                      <div style={{ fontSize:12, color:"#888", marginTop:3 }}>{test.subject} — {qs.length} Questions — {test.durationMins} min</div>
+                      <div style={{ display:"flex", gap:14, marginTop:10, flexWrap:"wrap" }}>
+                        <span style={{ fontSize:13, color:"#43a047", fontWeight:700 }}>✅ {nC} Correct</span>
+                        <span style={{ fontSize:13, color:"#e53935", fontWeight:700 }}>❌ {nW} Wrong</span>
+                        <span style={{ fontSize:13, color:"#9e9e9e", fontWeight:700 }}>⬜ {nS} Skipped</span>
+                        <span style={{ fontSize:13, color:"#555" }}>⏱ {fmt(sub.timeTaken || 0)}</span>
+                      </div>
+                      {/* Score bar */}
+                      <div style={{ marginTop:10, maxWidth:300 }}>
+                        <div style={{ height:7, background:"#f0f0f0", borderRadius:4, overflow:"hidden" }}>
+                          <div style={{ height:"100%", width:`${pct}%`, background:scoreColor, borderRadius:4, transition:"width 0.5s" }} />
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:28, fontWeight:900, color:scoreColor }}>{scored}</div>
+                      <div style={{ fontSize:11, color:"#888" }}>/{maxMarks} marks</div>
+                      <div style={{ fontSize:15, fontWeight:700, color:scoreColor, marginTop:2 }}>{pct}%</div>
+                      <button onClick={() => onViewResult(test, sub)}
+                        style={{ marginTop:10, padding:"9px 18px", borderRadius:10, border:"none", background:"linear-gradient(135deg,#1a237e,#3949ab)", color:"white", fontWeight:700, cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>
+                        Full Analysis →
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </Section>
+        )}
       </div>
     </div>
   );
@@ -1652,6 +1718,117 @@ function Countdown({ target }) {
   useEffect(() => { const t = setInterval(()=>setDiff(Math.max(0, Math.floor((target-Date.now())/1000))), 1000); return ()=>clearInterval(t); }, [target]);
   const h = Math.floor(diff/3600), m = Math.floor((diff%3600)/60), s = diff%60;
   return <div style={{ fontWeight:800, fontSize:18, color:"#e65100", fontVariantNumeric:"tabular-nums" }}>{`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`}</div>;
+}
+
+/* ─────────────────────────────────────────────
+   INSTRUCTIONS SCREEN  (shown before test starts)
+   Matches NTA / IIT-School style consent page
+───────────────────────────────────────────── */
+function InstructionsScreen({ test, student, onProceed, onBack }) {
+  const [agreed, setAgreed] = useState(false);
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#f4f6fb", fontFamily:"Arial, sans-serif" }}>
+      {/* Header */}
+      <div style={{ background:"linear-gradient(135deg,#1a237e,#283593)", color:"white", padding:"0 24px", height:56, display:"flex", alignItems:"center", gap:16 }}>
+        <div style={{ background:"#ffca28", color:"#1a237e", fontWeight:900, fontSize:13, padding:"3px 10px", borderRadius:4, letterSpacing:1 }}>NTA</div>
+        <div>
+          <div style={{ fontWeight:800, fontSize:13 }}>JEE (Main)</div>
+          <div style={{ fontSize:10, opacity:0.6 }}>National Testing Agency</div>
+        </div>
+        <div style={{ flex:1, textAlign:"center", fontWeight:700, fontSize:15 }}>{test.title}</div>
+        <div style={{ fontSize:13, opacity:0.8 }}>👤 {student.name}</div>
+      </div>
+
+      <div style={{ maxWidth:900, margin:"0 auto", padding:"28px 20px" }}>
+        {/* Title box */}
+        <div style={{ background:"#1a237e", color:"white", padding:"12px 20px", borderRadius:"8px 8px 0 0", fontWeight:800, fontSize:16, letterSpacing:0.5 }}>
+          GENERAL INSTRUCTIONS
+        </div>
+        <div style={{ background:"white", borderRadius:"0 0 8px 8px", boxShadow:"0 2px 12px rgba(0,0,0,0.08)", padding:"28px 28px 20px" }}>
+          <p style={{ textAlign:"center", fontWeight:700, fontSize:15, marginTop:0, marginBottom:24, color:"#1a237e" }}>Please read the instructions carefully</p>
+
+          <h3 style={{ color:"#1a237e", borderBottom:"2px solid #1a237e", paddingBottom:6, marginTop:0 }}>General Instructions:</h3>
+          <ol style={{ lineHeight:2, fontSize:14, color:"#333", paddingLeft:22 }}>
+            <li>The clock will be set at the server. The countdown timer in the top right corner of the screen will display the remaining time available for you to complete the examination. When the timer reaches zero, the examination will end automatically.</li>
+            <li>The Questions Palette on the right side of the screen will show the status of each question:
+              <ol type="a" style={{ marginTop:8, lineHeight:2 }}>
+                <li><span style={{ display:"inline-block", width:22, height:22, borderRadius:"50%", background:"#787878", color:"white", textAlign:"center", lineHeight:"22px", fontSize:12, fontWeight:700, marginRight:6 }}>1</span> You have <b>not visited</b> the question yet.</li>
+                <li><span style={{ display:"inline-block", width:22, height:22, borderRadius:"50%", background:"#c0392b", color:"white", textAlign:"center", lineHeight:"22px", fontSize:12, fontWeight:700, marginRight:6 }}>2</span> You have <b>not answered</b> the question.</li>
+                <li><span style={{ display:"inline-block", width:22, height:22, borderRadius:"50%", background:"#26a541", color:"white", textAlign:"center", lineHeight:"22px", fontSize:12, fontWeight:700, marginRight:6 }}>3</span> You have <b>answered</b> the question.</li>
+                <li><span style={{ display:"inline-block", width:22, height:22, borderRadius:"50%", background:"#8b3fa8", color:"white", textAlign:"center", lineHeight:"22px", fontSize:12, fontWeight:700, marginRight:6 }}>4</span> You have <b>NOT answered</b> but marked the question for review.</li>
+                <li><span style={{ display:"inline-block", width:22, height:22, borderRadius:"50%", background:"#8b3fa8", color:"white", textAlign:"center", lineHeight:"22px", fontSize:12, fontWeight:700, marginRight:6, border:"3px solid #26a541" }}>5</span> <b>Answered and Marked for Review</b> — will be considered for evaluation.</li>
+              </ol>
+            </li>
+            <li>You can use the <b>question palette</b> on the right to navigate directly to any question. This does NOT save your current answer.</li>
+          </ol>
+
+          <h3 style={{ color:"#1a237e", borderBottom:"2px solid #1a237e", paddingBottom:6 }}>Navigating to a Question:</h3>
+          <ol start={4} style={{ lineHeight:2, fontSize:14, color:"#333", paddingLeft:22 }}>
+            <li>Click on the question number in the Question Palette to go directly to that question. Note: this does NOT save your answer.</li>
+            <li>Click <b>Save &amp; Next</b> to save your answer and go to the next question.</li>
+            <li>Click <b>Mark for Review &amp; Next</b> to save and mark the question, then proceed to the next question.</li>
+          </ol>
+
+          <h3 style={{ color:"#1a237e", borderBottom:"2px solid #1a237e", paddingBottom:6 }}>Answering a Question:</h3>
+          <ol start={7} style={{ lineHeight:2, fontSize:14, color:"#333", paddingLeft:22 }}>
+            <li>For <b>Multiple Choice</b> questions: click the option button to select. Click again or click <b>Clear Response</b> to deselect.</li>
+            <li>For <b>Integer type</b> questions: enter the numeric answer using the on-screen keypad.</li>
+            <li>To change your answer, select a different option or re-enter the value.</li>
+            <li>You must click <b>Save &amp; Next</b> to confirm your answer.</li>
+          </ol>
+
+          <h3 style={{ color:"#1a237e", borderBottom:"2px solid #1a237e", paddingBottom:6 }}>Marking Scheme:</h3>
+          <ol start={11} style={{ lineHeight:2, fontSize:14, color:"#333", paddingLeft:22 }}>
+            <li><b>MCQ:</b> +4 for correct answer, −1 for incorrect answer, 0 for skipped.</li>
+            <li><b>Integer type:</b> +4 for correct answer, 0 for incorrect or skipped (no negative marking).</li>
+            <li>After clicking <b>Save &amp; Next</b> on the last question of a section, you will be taken to the first question of the next section.</li>
+            <li>You can move between questions freely during the examination time.</li>
+          </ol>
+
+          {/* Exam details */}
+          <div style={{ background:"#e8eaf6", borderRadius:8, padding:"14px 18px", marginTop:16, marginBottom:20, fontSize:14 }}>
+            <div style={{ fontWeight:700, color:"#1a237e", marginBottom:8 }}>📋 Exam Details</div>
+            <div style={{ display:"flex", gap:24, flexWrap:"wrap", color:"#333" }}>
+              <span>📚 <b>Subject:</b> {test.subject || "Mixed"}</span>
+              <span>❓ <b>Questions:</b> {test.questions?.length || 0}</span>
+              <span>⏱ <b>Duration:</b> {test.durationMins || 180} minutes</span>
+              <span>👤 <b>Candidate:</b> {student.name}</span>
+            </div>
+          </div>
+
+          {/* Consent checkbox — matches screenshot */}
+          <div style={{ borderTop:"1px solid #e0e0e0", paddingTop:18, marginTop:8 }}>
+            <label style={{ display:"flex", gap:12, cursor:"pointer", fontSize:13, color:"#333", lineHeight:1.6, alignItems:"flex-start" }}>
+              <input type="checkbox" checked={agreed} onChange={e => setAgreed(e.target.checked)}
+                style={{ marginTop:3, width:18, height:18, cursor:"pointer", flexShrink:0 }} />
+              <span>
+                I have read and understood the instructions. All computer hardware allotted to me are in proper working condition.
+                I declare that I am not in possession of / not wearing / not carrying any prohibited gadget like mobile phone,
+                bluetooth devices etc. / any prohibited material with me into the Examination Hall. I agree that in case of not
+                adhering to the instructions, I shall be liable to be debarred from this Test and/or to disciplinary action,
+                which may include ban from future Tests / Examinations.
+              </span>
+            </label>
+          </div>
+
+          <div style={{ display:"flex", gap:12, marginTop:20, justifyContent:"center" }}>
+            <button onClick={onBack}
+              style={{ padding:"11px 28px", borderRadius:8, border:"1px solid #bbb", background:"white", color:"#555", fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit" }}>
+              ← Go Back
+            </button>
+            <button onClick={onProceed} disabled={!agreed}
+              style={{ padding:"11px 32px", borderRadius:8, border:"none",
+                background: agreed ? "linear-gradient(135deg,#26a541,#1b5e20)" : "#bbb",
+                color:"white", fontWeight:800, fontSize:14,
+                cursor: agreed ? "pointer" : "not-allowed", fontFamily:"inherit", letterSpacing:0.3 }}>
+              PROCEED →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ─────────────────────────────────────────────
