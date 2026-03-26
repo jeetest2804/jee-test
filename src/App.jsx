@@ -866,8 +866,7 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const MODELS = [
     { id: "gemini-2.0-flash",      label: "Gemini 2.0 Flash",      limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best overall — fast, reliable, great for PDFs" },
     { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite",  limit: "1500 req/day", badge: "🚀 Fastest",      badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Fastest response, use if quota is tight" },
-    { id: "gemini-1.5-flash",      label: "Gemini 1.5 Flash",       limit: "1500 req/day", badge: "✅ Stable",       badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Very stable, proven to work well" },
-    { id: "gemini-1.5-flash-8b",   label: "Gemini 1.5 Flash 8B",    limit: "1500 req/day", badge: "🔄 Fallback",     badgeColor: "#00695c", badgeBg: "#e0f2f1", note: "Smallest model, use as last resort" },
+    { id: "gemini-2.5-pro-preview-03-25", label: "Gemini 2.5 Pro", limit: "50 req/day", badge: "🧠 Smartest", badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Most accurate extraction, lower daily quota" },
   ];
 
   return (
