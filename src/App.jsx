@@ -760,7 +760,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               <div style={{ marginTop:20, borderRadius:12, padding:16, border:"1px solid #c8e6c9", background:"#e8f5e9", display:"flex", alignItems:"flex-start", gap:12 }}>
                 <span style={{ fontSize:24 }}>🤖</span>
                 <div>
-                  <div style={{ fontWeight:700, color:"#2e7d32", fontSize:14 }}>Gemini AI is ready</div>
+                  <div style={{ fontWeight:700, color:"#2e7d32", fontSize:14 }}>AI is ready</div>
                   <div style={{ fontSize:12, color:"#555", marginTop:3 }}>
                     Questions will be extracted automatically using the Gemini API key configured on your server (Render environment variable). You don't need to enter anything here.
                   </div>
@@ -867,13 +867,13 @@ function SettingsView({ savedDriveKey, onSave }) {
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <span style={{ fontSize:22 }}>🤖</span>
           <div>
-            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini API Key</div>
+            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>OpenRouter API Key</div>
             <div style={{ fontSize:12, color:"#888" }}>Stored securely as a Render environment variable</div>
           </div>
           <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>🔒 Server-side</span>
         </div>
         <div style={{ marginTop:12, background:"#f8f9ff", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#555" }}>
-          To change the key: go to <b>Render → Your Service → Environment → Environment Variables</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>GEMINI_API_KEY</code> → Redeploy.
+          To change: go to <b>Render → Your Service → Environment</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>OPENROUTER_API_KEY</code> → Save → Redeploy.
         </div>
       </div>
 
