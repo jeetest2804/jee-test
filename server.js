@@ -27,9 +27,9 @@ app.use(express.static(distPath));
 
 /* ══════════════════════════════════════════════════════
    /api/parse-pdf  — Gemini AI PDF parsing (FREE)
-   gemini-1.5-flash: 1500 requests/day free
-   gemini-1.5-pro : 50 requests/day free (fallback)
-   gemini-2.0-flash: also free (fallback)
+   Model is selected by admin from the web UI and
+   passed in the request body as "model".
+   Fallback order if model fails: flash → 2.0-flash → pro
 ══════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
   const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -40,7 +40,7 @@ app.post("/api/parse-pdf", async (req, res) => {
     });
   }
 
-  const { base64, isKey } = req.body;
+  const { base64, isKey, model: requestedModel } = req.body;
   if (!base64) {
     return res.status(400).json({ error: "Missing base64 PDF data" });
   }
@@ -65,12 +65,19 @@ Rules:
 - Extract EVERY question in the PDF, do not skip any
 - Output pure JSON only, no explanation`;
 
-  // Gemini models tried in order — all free tier
-  const models = [
-    "gemini-1.5-flash",   // 1500 req/day free — fastest
-    "gemini-2.0-flash",   // also free
-    "gemini-1.5-pro",     // 50 req/day free — most capable
+  // Build model list: requested model first, then fallbacks
+  const ALL_MODELS = [
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash-latest",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-002",
+    "gemini-2.5-flash-preview-05-20",
   ];
+  const primary = requestedModel && ALL_MODELS.includes(requestedModel)
+    ? requestedModel
+    : "gemini-2.0-flash-exp";
+  const fallbacks = ALL_MODELS.filter(m => m !== primary);
+  const models = [primary, ...fallbacks];
 
   let lastError = null;
 
@@ -166,7 +173,7 @@ Rules:
 
       const count = isKey ? parsed.answers.length : parsed.questions.length;
       console.log(`[Gemini] ✅ Success with ${model}! Items extracted: ${count}`);
-      return res.status(200).json({ ok: true, data: parsed });
+      return res.status(200).json({ ok: true, data: parsed, modelUsed: model });
 
     } catch (fetchErr) {
       lastError = `Fetch error for ${model}: ${fetchErr.message}`;
