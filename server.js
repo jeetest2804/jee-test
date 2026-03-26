@@ -170,14 +170,14 @@ CRITICAL DIAGRAM RULES — read carefully:
      "[FIGURE: a-t graph. Zero from t=0 to t0, then jumps to constant value]"
    ]
 
-3. For graph descriptions be PRECISE about shape:
-   - "increases linearly" = straight diagonal line going up
-   - "parabola/concave up" = curved line bending upward  
-   - "constant" = horizontal flat line
-   - "jumps" = vertical step up
-   - "drops to zero" = vertical line going down to x-axis
-   Always mention: starting point, any flat/zero region, transitions, end behavior.
-   Always mention axis labels (a-t graph, v-t graph, F-t graph, etc.)
+3. For graph descriptions be PRECISE about shape using these EXACT phrases:
+   - Flat zero region: "zero from t=0 to t0"
+   - Parabola/curve up: "then curves upward as parabola" (no jump)
+   - Jump then linear: "then jumps up then increases linearly" 
+   - Jump then constant flat: "then jumps to constant flat plateau"
+   - Constant then linear: "then constant flat then increases linearly"
+   - Pure linear from origin: "increases linearly from origin"
+   - Always mention axis labels (a-t graph, v-t graph, etc.)
 
 4. For physics diagrams describe: object shapes, labels, forces with arrows and values, connections.
 
@@ -217,8 +217,7 @@ CRITICAL DIAGRAM RULES:
 2. OPTION DIAGRAMS: When options ARE graphs/diagrams, put [FIGURE: description] INSIDE each option string.
    WRONG: "options":["(A)","(B)","(C)","(D)"]
    CORRECT: "options":["[FIGURE: a-t graph showing zero then parabola curve up]","[FIGURE: a-t graph showing zero then linear increase after jump]","[FIGURE: ...]","[FIGURE: ...]"]
-   For graph descriptions: state axis labels, starting value, shape (linear/parabola/constant/step), transitions.
-   NEVER use empty option labels when options contain graphs.
+   For graph descriptions use EXACT phrases: "zero from t=0 to t0, then curves upward as parabola" / "zero from t=0 to t0, then jumps up then increases linearly" / "zero from t=0 to t0, then constant flat then increases linearly" / "zero from t=0 to t0, then jumps to constant flat plateau". State axis labels.
 
 Return ONLY valid JSON:
 {"questions":[
