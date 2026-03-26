@@ -77,7 +77,7 @@ app.get("/api/models", async (req, res) => {
 const tmpDir = "/tmp/jee-pdf-pages";
 mkdirSync(tmpDir, { recursive: true });
 
-async function pdfPageToBase64(pdfBase64, pageNumber) {
+async function pdfPageToBase64(pdfBase64, pageNumber, cropRegion) {
   if (!pageNumber || pageNumber < 1) return null;
   const sessionId = randomUUID();
   const pdfPath = join(tmpDir, `${sessionId}.pdf`);
@@ -97,7 +97,6 @@ async function pdfPageToBase64(pdfBase64, pageNumber) {
     let imgPath = `${outPrefix}-${padded}.png`;
 
     if (!existsSync(imgPath)) {
-      // Try other padding lengths
       for (let pad = 1; pad <= 5; pad++) {
         const alt = `${outPrefix}-${String(pageNumber).padStart(pad, "0")}.png`;
         if (existsSync(alt)) { imgPath = alt; break; }
@@ -105,6 +104,39 @@ async function pdfPageToBase64(pdfBase64, pageNumber) {
     }
 
     if (!existsSync(imgPath)) return null;
+
+    // If cropRegion provided, crop the image to the figure area
+    if (cropRegion && cropRegion.top !== undefined && cropRegion.bottom !== undefined) {
+      const croppedPath = `${outPrefix}-cropped.png`;
+      try {
+        // Get image dimensions
+        const dimOut = execSync(`identify -format "%wx%h" "${imgPath}"`, { stdio: "pipe" }).toString().trim();
+        const [imgW, imgH] = dimOut.split("x").map(Number);
+
+        // Add 3% padding above/below the figure region, clamp to [0, 100]
+        const pad = 3;
+        const topPct  = Math.max(0,   cropRegion.top    - pad);
+        const botPct  = Math.min(100, cropRegion.bottom + pad);
+
+        const cropY      = Math.round((topPct  / 100) * imgH);
+        const cropHeight = Math.round(((botPct - topPct) / 100) * imgH);
+
+        if (cropHeight > 10) {
+          execSync(
+            `convert "${imgPath}" -crop ${imgW}x${cropHeight}+0+${cropY} +repage "${croppedPath}"`,
+            { timeout: 15000, stdio: "pipe" }
+          );
+          if (existsSync(croppedPath)) {
+            const data = readFileSync(croppedPath).toString("base64");
+            unlinkSync(croppedPath);
+            unlinkSync(imgPath);
+            return data;
+          }
+        }
+      } catch (cropErr) {
+        console.error(`[PDF2Img] Crop failed, returning full page:`, cropErr.message);
+      }
+    }
 
     const data = readFileSync(imgPath).toString("base64");
     unlinkSync(imgPath);
@@ -117,11 +149,11 @@ async function pdfPageToBase64(pdfBase64, pageNumber) {
   }
 }
 
-/* /api/page-image — render one PDF page to PNG */
+/* /api/page-image — render one PDF page to PNG, optionally cropped to figure region */
 app.post("/api/page-image", async (req, res) => {
-  const { base64, page } = req.body;
+  const { base64, page, cropRegion } = req.body;
   if (!base64 || !page) return res.status(400).json({ error: "Missing base64 or page" });
-  const image = await pdfPageToBase64(base64, page);
+  const image = await pdfPageToBase64(base64, page, cropRegion);
   if (!image) return res.status(500).json({ error: "Could not render PDF page. Is poppler-utils installed?" });
   return res.json({ ok: true, image, page });
 });
@@ -185,20 +217,21 @@ FIGURE HANDLING — THIS IS CRITICAL:
 When a question or its options contain a diagram, graph, circuit, or any visual figure:
 - Set "hasFigure": true
 - Set "figurePageNumber": the PDF page number (integer) where the figure appears
+- Set "figureRegion": an object {"top": T, "bottom": B} where T and B are the percentage (0-100) of the page height where the figure starts and ends. E.g. if the figure occupies from 35% to 65% of the page, set {"top": 35, "bottom": 65}. Be precise — this is used to crop the image to show only the diagram.
 - In the question "text", write [FIGURE] as a placeholder at the position of the diagram
 - For MCQ options that are themselves diagrams (e.g. "which graph is correct?"):
   write "[FIGURE_A]", "[FIGURE_B]", "[FIGURE_C]", "[FIGURE_D]" in the options array
-- Do NOT describe the diagram in words — just mark the page number
+- Do NOT describe the diagram in words — just mark the page number and region
 
 Example (figure in question body):
-{"id":5,"subject":"${subject}","type":"mcq","text":"A block of mass 2kg is placed as shown. [FIGURE] Find the normal force.","options":["10N","20N","15N","25N"],"correct":1,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":4}
+{"id":5,"subject":"${subject}","type":"mcq","text":"A block of mass 2kg is placed as shown. [FIGURE] Find the normal force.","options":["10N","20N","15N","25N"],"correct":1,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":4,"figureRegion":{"top":40,"bottom":68}}
 
 Example (options are graphs/diagrams):
-{"id":8,"subject":"${subject}","type":"mcq","text":"The velocity-time graph for the given motion is:","options":["[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"],"correct":2,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":6}
+{"id":8,"subject":"${subject}","type":"mcq","text":"The velocity-time graph for the given motion is:","options":["[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"],"correct":2,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":6,"figureRegion":{"top":30,"bottom":75}}
 
 Return ONLY valid JSON:
 {"questions":[
-{"id":${startId},"subject":"${subject}","type":"mcq","text":"question text","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":false,"figurePageNumber":null}
+{"id":${startId},"subject":"${subject}","type":"mcq","text":"question text","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":false,"figurePageNumber":null,"figureRegion":null}
 ]}
 
 RULES:
@@ -209,6 +242,7 @@ RULES:
 - marks: 4, negative: -1 for MCQ, 0 for integer
 - hasFigure: true only when question has an actual visual element (not just symbols)
 - figurePageNumber: exact PDF page number as integer, or null
+- figureRegion: {"top": percentage, "bottom": percentage} where the figure is on the page, or null
 - Extract EVERY ${subject} question — do not skip any
 - Output ONLY the JSON object, no markdown`;
 }
@@ -229,14 +263,15 @@ function buildFullPrompt() {
 FIGURE HANDLING:
 - hasFigure: true when a visual diagram/graph/figure is present
 - figurePageNumber: exact PDF page number (integer) where the figure is
+- figureRegion: {"top": T, "bottom": B} where T and B are percentages (0-100) of the page height bounding the figure. E.g. {"top": 35, "bottom": 65}. Be precise.
 - In text: write [FIGURE] where the diagram appears
 - Options that are diagrams: write "[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"
 - Do NOT describe figures in words
 
 Return ONLY valid JSON:
 {"questions":[
-{"id":1,"subject":"Physics","type":"mcq","text":"text [FIGURE]","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":3},
-{"id":2,"subject":"Chemistry","type":"integer","text":"text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false,"figurePageNumber":null}
+{"id":1,"subject":"Physics","type":"mcq","text":"text [FIGURE]","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":3,"figureRegion":{"top":40,"bottom":68}},
+{"id":2,"subject":"Chemistry","type":"integer","text":"text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false,"figurePageNumber":null,"figureRegion":null}
 ]}
 - subject: "Physics", "Chemistry", or "Mathematics" exactly
 - Extract ALL questions. Output ONLY JSON.`;
