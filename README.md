@@ -1,47 +1,47 @@
-# TestForge — JEE Exam Platform
+# JEE TestForge — Improved with Real Diagram Images
 
-## Deploy on Render (Step-by-Step)
+## What Changed (v2)
 
-### 1. Push to GitHub
-```bash
-git init
-git add .
-git commit -m "initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/jee-test-app.git
-git push -u origin main
-```
+**Problem fixed:** Diagrams were being re-drawn from text descriptions, causing wrong/random figures.
 
-### 2. Create Web Service on Render
-1. Go to https://render.com → **New** → **Web Service**
-2. Connect your GitHub repo
-3. Use these settings:
-   - **Environment:** Node
-   - **Build Command:** `npm run render-build`
-   - **Start Command:** `npm start`
+**Solution:** When a question has a figure, the server now renders the **actual PDF page** as a PNG image and shows it directly — no re-drawing, 100% accurate.
 
-### 3. Set Environment Variable
-In Render → Your Service → **Environment** tab:
-- Key: `GEMINI_API_KEY`
-- Value: your Gemini API key from https://aistudio.google.com/app/apikey
+### How it works
+1. Gemini reads the PDF and notes the **page number** for each question with a figure
+2. A new `/api/page-image` endpoint renders that exact PDF page using `pdftoppm`
+3. The frontend shows the real image from the PDF — circuits, graphs, geometry — exactly as printed
 
-### 4. Deploy
-Click **Deploy** — Render will build and start your app automatically.
+---
+
+## Deploy to Render.com
+
+1. Push this folder to a GitHub repo
+2. Go to [render.com](https://render.com) → New → Web Service → connect your repo
+3. Render will auto-detect `render.yaml` and configure everything
+4. In Render dashboard → Environment → add: `GEMINI_API_KEY = your_key_here`
+5. Deploy!
+
+> `poppler-utils` is installed automatically by the build command in `render.yaml`.
 
 ---
 
 ## Local Development
 
 ```bash
-# Terminal 1 — Start Express server
-node server.js
-
-# Terminal 2 — Start Vite dev server
-npm run dev
+npm install
+GEMINI_API_KEY=your_key npm run dev   # frontend on :5173
+node server.js                         # backend on :3000
 ```
 
-Create a `.env` file in the root:
-```
-GEMINI_API_KEY=your_key_here
-```
+Requires `poppler-utils` locally:
+- Ubuntu/Debian: `sudo apt-get install poppler-utils`
+- Mac: `brew install poppler`
 
-Then visit http://localhost:5173
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `GEMINI_API_KEY` | Your Google Gemini API key (required) |
+| `PORT` | Server port (default 3000) |

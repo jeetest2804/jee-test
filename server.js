@@ -2,7 +2,9 @@ import express from "express";
 import cors from "cors";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { existsSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, mkdirSync, readFileSync } from "fs";
+import { execSync } from "child_process";
+import { randomUUID } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,11 +14,8 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: "100mb" }));
-
 app.use((req, res, next) => {
-  res.setTimeout(600_000, () => {
-    res.status(503).json({ error: "Server timeout." });
-  });
+  res.setTimeout(600_000, () => res.status(503).json({ error: "Server timeout." }));
   next();
 });
 
@@ -56,10 +55,9 @@ async function getAvailableModels(apiKey) {
     ];
     cachedModels = sorted.length > 0 ? sorted : PREFERRED_ORDER;
     cacheTime = now;
-    console.log(`[Models] List: ${cachedModels.slice(0, 3).join(", ")} ...`);
     return cachedModels;
   } catch (err) {
-    console.error("[Models] Fetch failed:", err.message, "— using defaults");
+    console.error("[Models] Fetch failed:", err.message);
     return PREFERRED_ORDER;
   }
 }
@@ -72,8 +70,64 @@ app.get("/api/models", async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════════════
+   PDF PAGE → BASE64 PNG IMAGE
+   Renders a specific PDF page using pdftoppm (poppler-utils).
+   Returns base64 PNG string, or null if it fails.
+══════════════════════════════════════════════════════════════════ */
+const tmpDir = "/tmp/jee-pdf-pages";
+mkdirSync(tmpDir, { recursive: true });
+
+async function pdfPageToBase64(pdfBase64, pageNumber) {
+  if (!pageNumber || pageNumber < 1) return null;
+  const sessionId = randomUUID();
+  const pdfPath = join(tmpDir, `${sessionId}.pdf`);
+  const outPrefix = join(tmpDir, sessionId);
+
+  try {
+    writeFileSync(pdfPath, Buffer.from(pdfBase64, "base64"));
+
+    const pg = String(pageNumber);
+    execSync(
+      `pdftoppm -r 150 -f ${pg} -l ${pg} -png "${pdfPath}" "${outPrefix}"`,
+      { timeout: 30000, stdio: "pipe" }
+    );
+
+    // Find the output file (pdftoppm uses zero-padded names)
+    const padded = String(pageNumber).padStart(6, "0");
+    let imgPath = `${outPrefix}-${padded}.png`;
+
+    if (!existsSync(imgPath)) {
+      // Try other padding lengths
+      for (let pad = 1; pad <= 5; pad++) {
+        const alt = `${outPrefix}-${String(pageNumber).padStart(pad, "0")}.png`;
+        if (existsSync(alt)) { imgPath = alt; break; }
+      }
+    }
+
+    if (!existsSync(imgPath)) return null;
+
+    const data = readFileSync(imgPath).toString("base64");
+    unlinkSync(imgPath);
+    return data;
+  } catch (err) {
+    console.error(`[PDF2Img] Page ${pageNumber} failed:`, err.message);
+    return null;
+  } finally {
+    try { unlinkSync(pdfPath); } catch {}
+  }
+}
+
+/* /api/page-image — render one PDF page to PNG */
+app.post("/api/page-image", async (req, res) => {
+  const { base64, page } = req.body;
+  if (!base64 || !page) return res.status(400).json({ error: "Missing base64 or page" });
+  const image = await pdfPageToBase64(base64, page);
+  if (!image) return res.status(500).json({ error: "Could not render PDF page. Is poppler-utils installed?" });
+  return res.json({ ok: true, image, page });
+});
+
+/* ══════════════════════════════════════════════════════════════════
    CORE: Call Gemini with a prompt + PDF base64
-   Returns parsed JSON or throws
 ══════════════════════════════════════════════════════════════════ */
 async function callGemini(apiKey, model, base64, promptText) {
   const res = await fetch(
@@ -82,62 +136,35 @@ async function callGemini(apiKey, model, base64, promptText) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: "application/pdf", data: base64 } },
-            { text: promptText },
-          ],
-        }],
+        contents: [{ parts: [
+          { inline_data: { mime_type: "application/pdf", data: base64 } },
+          { text: promptText },
+        ]}],
         generationConfig: { temperature: 0.1, maxOutputTokens: 32768 },
       }),
     }
   );
-
-  if (!res.ok) {
-    const body = await res.text();
-    const err = new Error(`HTTP ${res.status}: ${body}`);
-    err.status = res.status;
-    throw err;
-  }
-
+  if (!res.ok) { const b = await res.text(); const e = new Error(`HTTP ${res.status}: ${b}`); e.status = res.status; throw e; }
   const data = await res.json();
   let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  if (!txt) {
-    throw new Error(`Empty response. finishReason=${data.candidates?.[0]?.finishReason}`);
-  }
-
-  // Strip markdown fences
-  txt = txt.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
-
-  // Extract outermost JSON object
-  const start = txt.indexOf("{");
-  const end = txt.lastIndexOf("}");
+  if (!txt) throw new Error(`Empty response. finishReason=${data.candidates?.[0]?.finishReason}`);
+  txt = txt.replace(/^```json\s*/i,"").replace(/^```\s*/i,"").replace(/\s*```$/i,"").trim();
+  const start = txt.indexOf("{"), end = txt.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("No JSON object found in response");
-
   return JSON.parse(txt.slice(start, end + 1));
 }
 
-/* ══════════════════════════════════════════════════════════════════
-   Try callGemini across all available models, return first success
-══════════════════════════════════════════════════════════════════ */
 async function callGeminiWithFallback(apiKey, models, base64, promptText, validate) {
   let lastError = null;
   for (const model of models) {
     try {
-      console.log(`[Gemini] Trying ${model}...`);
       const parsed = await callGemini(apiKey, model, base64, promptText);
-      if (validate && !validate(parsed)) {
-        lastError = `${model}: validation failed`;
-        console.error(`[Gemini] ${lastError}`);
-        continue;
-      }
+      if (validate && !validate(parsed)) { lastError = `${model}: validation failed`; continue; }
       console.log(`[Gemini] ✅ ${model} succeeded`);
       return { parsed, model };
     } catch (err) {
       lastError = `${model}: ${err.message}`;
-      console.error(`[Gemini] ${lastError}`);
-      if (err.status === 404) cachedModels = null; // Invalidate cache
-      continue;
+      if (err.status === 404) cachedModels = null;
     }
   }
   throw new Error(lastError || "All models failed");
@@ -145,57 +172,45 @@ async function callGeminiWithFallback(apiKey, models, base64, promptText, valida
 
 /* ══════════════════════════════════════════════════════════════════
    BUILD PROMPTS
+   
+   KEY CHANGE: Ask Gemini to return figurePageNumber for each 
+   question with a figure. Frontend uses this to fetch the actual
+   PDF page image — no more re-drawing diagrams from descriptions!
 ══════════════════════════════════════════════════════════════════ */
 function buildSubjectPrompt(subject, startId) {
   return `You are extracting ONLY the ${subject} questions from this JEE exam PDF.
+Focus exclusively on ${subject} questions. Question IDs start from ${startId}.
 
-Focus exclusively on ${subject} questions. Ignore other subjects.
-Question IDs start from ${startId} and must be sequential.
+FIGURE HANDLING — THIS IS CRITICAL:
+When a question or its options contain a diagram, graph, circuit, or any visual figure:
+- Set "hasFigure": true
+- Set "figurePageNumber": the PDF page number (integer) where the figure appears
+- In the question "text", write [FIGURE] as a placeholder at the position of the diagram
+- For MCQ options that are themselves diagrams (e.g. "which graph is correct?"):
+  write "[FIGURE_A]", "[FIGURE_B]", "[FIGURE_C]", "[FIGURE_D]" in the options array
+- Do NOT describe the diagram in words — just mark the page number
 
-CRITICAL DIAGRAM RULES — read carefully:
+Example (figure in question body):
+{"id":5,"subject":"${subject}","type":"mcq","text":"A block of mass 2kg is placed as shown. [FIGURE] Find the normal force.","options":["10N","20N","15N","25N"],"correct":1,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":4}
 
-1. QUESTION DIAGRAMS: If the question itself has a figure/diagram, embed it in "text" using [FIGURE: description].
-   Example: "text": "Two blocks on a surface. [FIGURE: Two blocks A(3kg) and B(5kg) on horizontal surface. Force F1=50N pushes A from left. F2=18N pushes B from right. A and B are in contact.]"
+Example (options are graphs/diagrams):
+{"id":8,"subject":"${subject}","type":"mcq","text":"The velocity-time graph for the given motion is:","options":["[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"],"correct":2,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":6}
 
-2. OPTION DIAGRAMS — THIS IS THE MOST IMPORTANT RULE:
-   When each option IS a graph or diagram (like "which graph shows the a-t relationship?"),
-   you MUST include a [FIGURE: description] tag INSIDE each option string.
-   NEVER put just "(A)", "(B)", "(C)", "(D)" as option text.
-   
-   WRONG: "options":["(A)","(B)","(C)","(D)"]
-   CORRECT: "options":[
-     "[FIGURE: a-t graph. Zero from t=0 to t0, then curves upward as parabola]",
-     "[FIGURE: a-t graph. Zero from t=0 to t0, then jumps up and increases linearly]",
-     "[FIGURE: a-t graph. Zero from t=0 to t0, then increases linearly from origin]",
-     "[FIGURE: a-t graph. Zero from t=0 to t0, then jumps to constant value]"
-   ]
-
-3. For graph descriptions be PRECISE about shape using these EXACT phrases:
-   - Flat zero region: "zero from t=0 to t0"
-   - Parabola/curve up: "then curves upward as parabola" (no jump)
-   - Jump then linear: "then jumps up then increases linearly" 
-   - Jump then constant flat: "then jumps to constant flat plateau"
-   - Constant then linear: "then constant flat then increases linearly"
-   - Pure linear from origin: "increases linearly from origin"
-   - Always mention axis labels (a-t graph, v-t graph, etc.)
-
-4. For physics diagrams describe: object shapes, labels, forces with arrows and values, connections.
-
-Return ONLY valid JSON — no markdown, no explanation:
+Return ONLY valid JSON:
 {"questions":[
-{"id":${startId},"subject":"${subject}","type":"mcq","text":"question text [FIGURE: desc if diagram in question]","options":["option A text or [FIGURE: desc]","option B or [FIGURE: desc]","option C or [FIGURE: desc]","option D or [FIGURE: desc]"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
-{"id":${startId+1},"subject":"${subject}","type":"integer","text":"full question text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
+{"id":${startId},"subject":"${subject}","type":"mcq","text":"question text","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":false,"figurePageNumber":null}
 ]}
 
 RULES:
 - subject: EXACTLY "${subject}"
-- type: "mcq" for 4-option, "integer" for numeric answer
-- options: 4 strings for MCQ — NEVER empty "(A)" labels, always real text or [FIGURE:...], empty [] for integer
-- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual number for integer
-- marks: 4, negative: -1 for MCQ / 0 for integer
-- hasFigure: true if question or any option has a diagram
+- type: "mcq" for 4-option questions, "integer" for numeric answer
+- options: 4 strings for MCQ (never empty), [] for integer
+- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual integer for integer type
+- marks: 4, negative: -1 for MCQ, 0 for integer
+- hasFigure: true only when question has an actual visual element (not just symbols)
+- figurePageNumber: exact PDF page number as integer, or null
 - Extract EVERY ${subject} question — do not skip any
-- Output ONLY the JSON object`;
+- Output ONLY the JSON object, no markdown`;
 }
 
 function buildAnswerKeyPrompt() {
@@ -203,53 +218,36 @@ function buildAnswerKeyPrompt() {
 Return ONLY valid JSON — no markdown:
 {"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
 - q = question number
-- For MCQ: correct = 0-based index (0=A, 1=B, 2=C, 3=D)
-- For integer: correct = the numeric answer
+- MCQ: correct = 0-based index (0=A, 1=B, 2=C, 3=D)
+- integer: correct = the numeric answer
 - Include ALL questions. Output ONLY JSON.`;
 }
 
 function buildFullPrompt() {
-  return `You are extracting ALL questions from a JEE exam PDF. Extract EVERY question — do not stop early.
-A full JEE paper has 75-90 questions across Physics, Chemistry, Mathematics.
+  return `Extract ALL questions from this JEE exam PDF. Do not stop early. Full JEE = 75-90 questions.
 
-CRITICAL DIAGRAM RULES:
-1. QUESTION DIAGRAMS: embed in "text" as [FIGURE: detailed description of what the diagram shows]
-2. OPTION DIAGRAMS: When options ARE graphs/diagrams, put [FIGURE: description] INSIDE each option string.
-   WRONG: "options":["(A)","(B)","(C)","(D)"]
-   CORRECT: "options":["[FIGURE: a-t graph showing zero then parabola curve up]","[FIGURE: a-t graph showing zero then linear increase after jump]","[FIGURE: ...]","[FIGURE: ...]"]
-   For graph descriptions use EXACT phrases: "zero from t=0 to t0, then curves upward as parabola" / "zero from t=0 to t0, then jumps up then increases linearly" / "zero from t=0 to t0, then constant flat then increases linearly" / "zero from t=0 to t0, then jumps to constant flat plateau". State axis labels.
+FIGURE HANDLING:
+- hasFigure: true when a visual diagram/graph/figure is present
+- figurePageNumber: exact PDF page number (integer) where the figure is
+- In text: write [FIGURE] where the diagram appears
+- Options that are diagrams: write "[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"
+- Do NOT describe figures in words
 
 Return ONLY valid JSON:
 {"questions":[
-{"id":1,"subject":"Physics","type":"mcq","text":"full text [FIGURE: desc if diagram in question]","options":["option A or [FIGURE: desc]","option B or [FIGURE: desc]","option C or [FIGURE: desc]","option D or [FIGURE: desc]"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
-{"id":2,"subject":"Physics","type":"integer","text":"full text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
+{"id":1,"subject":"Physics","type":"mcq","text":"text [FIGURE]","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":3},
+{"id":2,"subject":"Chemistry","type":"integer","text":"text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false,"figurePageNumber":null}
 ]}
-RULES:
-- subject: EXACTLY "Physics", "Chemistry", or "Mathematics"
-- type: "mcq" or "integer"
-- options: 4 real strings for MCQ (never just "(A)"), [] for integer
-- correct: 0-based for MCQ, actual number for integer
+- subject: "Physics", "Chemistry", or "Mathematics" exactly
 - Extract ALL questions. Output ONLY JSON.`;
 }
 
 /* ══════════════════════════════════════════════════════════════════
    /api/parse-pdf  — main endpoint
-   
-   Strategy for questions (isKey=false):
-   1. Try PARALLEL extraction — send 3 simultaneous requests for
-      Physics, Chemistry, Maths separately (each ~25 questions)
-   2. Merge results, re-number IDs sequentially
-   3. If parallel fails, fall back to single full-paper extraction
-   
-   For answer key (isKey=true): single call as before
 ══════════════════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
   const geminiApiKey = process.env.GEMINI_API_KEY;
-  if (!geminiApiKey) {
-    return res.status(500).json({
-      error: "GEMINI_API_KEY is not set. Add it in Render → Environment → Environment Variables.",
-    });
-  }
+  if (!geminiApiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
 
   const { base64, isKey, model: requestedModel } = req.body;
   if (!base64) return res.status(400).json({ error: "Missing base64 PDF data" });
@@ -259,105 +257,67 @@ app.post("/api/parse-pdf", async (req, res) => {
     ? [requestedModel, ...allModels.filter(m => m !== requestedModel)]
     : allModels;
 
-  /* ── ANSWER KEY: single call ── */
   if (isKey) {
     try {
       const { parsed, model } = await callGeminiWithFallback(
-        geminiApiKey, models, base64,
-        buildAnswerKeyPrompt(),
+        geminiApiKey, models, base64, buildAnswerKeyPrompt(),
         p => Array.isArray(p.answers) && p.answers.length > 0
       );
-      console.log(`[AnswerKey] ✅ Extracted ${parsed.answers.length} answers`);
       return res.status(200).json({ ok: true, data: parsed, modelUsed: model });
     } catch (err) {
       return res.status(502).json({ error: err.message });
     }
   }
 
-  /* ── QUESTIONS: parallel subject extraction ── */
   const subjects = ["Physics", "Chemistry", "Mathematics"];
-  // Starting IDs: Physics 1-30, Chemistry 31-60, Maths 61-90
   const startIds = { Physics: 1, Chemistry: 31, Mathematics: 61 };
 
-  console.log(`[Questions] Starting parallel extraction for all 3 subjects...`);
-
-  // Run all 3 subjects simultaneously
   const subjectResults = await Promise.allSettled(
     subjects.map(async (subject) => {
-      const prompt = buildSubjectPrompt(subject, startIds[subject]);
       const { parsed } = await callGeminiWithFallback(
-        geminiApiKey, models, base64, prompt,
+        geminiApiKey, models, base64,
+        buildSubjectPrompt(subject, startIds[subject]),
         p => Array.isArray(p.questions) && p.questions.length > 0
       );
-      const qs = parsed.questions.map(q => ({ ...q, subject }));
-      console.log(`[Questions] ${subject}: extracted ${qs.length} questions`);
-      return qs;
+      return parsed.questions.map(q => ({ ...q, subject }));
     })
   );
 
-  // Collect successful results
   const allQuestions = [];
   const failures = [];
-
-  subjectResults.forEach((result, i) => {
-    if (result.status === "fulfilled") {
-      allQuestions.push(...result.value);
-    } else {
-      failures.push(subjects[i]);
-      console.error(`[Questions] ${subjects[i]} failed:`, result.reason?.message);
-    }
+  subjectResults.forEach((r, i) => {
+    if (r.status === "fulfilled") allQuestions.push(...r.value);
+    else failures.push(subjects[i]);
   });
 
-  // If parallel worked for at least some subjects
   if (allQuestions.length > 0) {
-    // Sort by id and re-number sequentially
     allQuestions.sort((a, b) => (a.id || 0) - (b.id || 0));
     const numbered = allQuestions.map((q, i) => ({ ...q, id: i + 1 }));
-
-    console.log(`[Questions] ✅ Parallel extraction done: ${numbered.length} total questions`);
-    if (failures.length > 0) {
-      console.warn(`[Questions] ⚠️ Failed subjects: ${failures.join(", ")}`);
-    }
-
     return res.status(200).json({
-      ok: true,
-      data: { questions: numbered },
-      modelUsed: "parallel",
-      warning: failures.length > 0
-        ? `Could not extract ${failures.join(", ")} questions. Try again.`
-        : null,
+      ok: true, data: { questions: numbered }, modelUsed: "parallel",
+      warning: failures.length > 0 ? `Could not extract ${failures.join(", ")} questions.` : null,
     });
   }
 
-  // All parallel calls failed — fall back to single full-paper extraction
-  console.log("[Questions] Parallel failed, trying single full-paper extraction...");
   try {
     const { parsed, model } = await callGeminiWithFallback(
-      geminiApiKey, models, base64,
-      buildFullPrompt(),
+      geminiApiKey, models, base64, buildFullPrompt(),
       p => Array.isArray(p.questions) && p.questions.length > 0
     );
     const numbered = parsed.questions.map((q, i) => ({ ...q, id: i + 1 }));
-    console.log(`[Questions] ✅ Fallback extraction: ${numbered.length} questions`);
     return res.status(200).json({ ok: true, data: { questions: numbered }, modelUsed: model });
   } catch (err) {
     return res.status(502).json({ error: err.message });
   }
 });
 
-/* ── Catch-all: serve React app ── */
 app.get("*", (req, res) => {
   const indexPath = join(distPath, "index.html");
-  existsSync(indexPath)
-    ? res.sendFile(indexPath)
-    : res.status(404).send("App not built yet. Run: npm run build");
+  existsSync(indexPath) ? res.sendFile(indexPath) : res.status(404).send("Not built yet.");
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ TestForge server running on port ${PORT}`);
-  if (process.env.GEMINI_API_KEY) {
-    getAvailableModels(process.env.GEMINI_API_KEY)
-      .then(m => console.log(`[Models] Ready. Will try: ${m[0]} first`))
-      .catch(() => {});
-  }
+  console.log(`✅ TestForge server on port ${PORT}`);
+  try { execSync("which pdftoppm", { stdio: "pipe" }); console.log("✅ pdftoppm found — real diagram images enabled"); }
+  catch { console.warn("⚠️  Install poppler-utils: apt-get install -y poppler-utils"); }
 });
