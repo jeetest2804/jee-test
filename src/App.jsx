@@ -151,8 +151,8 @@ function GraphSVG({ desc, compact }) {
   const lw = compact ? 1.8 : 2.2;
   const fs = compact ? 9 : 12;
 
-  const xLabel = d.includes("time") || d.match(/[^a-z]t[^a-z]/) ? "t" :
-                 d.includes("displacement") || d.match(/[^a-z]x[^a-z]/) ? "x" : "t";
+  const xLabel = d.includes("time") || d.match(/\bt\b/) ? "t" :
+                 d.includes("displacement") || d.match(/\bx\b/) ? "x" : "t";
   const yLabel = d.includes("acceleration") || d.includes("a-t") ? "a" :
                  d.includes("velocity") || d.includes("v-t") ? "v" :
                  d.includes("force") || d.includes("f-t") ? "F" :
@@ -163,70 +163,120 @@ function GraphSVG({ desc, compact }) {
   const px = f => ox + f * gw;
   const py = f => oy - f * gh;
 
-  // ── Detect graph shape from description ──
-  const hasZeroRegion = d.includes("remains at 0") || d.includes("remains 0") ||
-    d.includes("stays at zero") || d.includes("a=0 for some time") ||
-    d.includes("zero for") || d.includes("at zero for") || d.includes("remains a=0");
+  // ── Feature detection ──
+  const hasZeroRegion =
+    d.includes("zero from") || d.includes("zero until") || d.includes("zero for") ||
+    d.includes("remains at 0") || d.includes("remains 0") || d.includes("stays at zero") ||
+    d.includes("a=0") || d.includes("at zero for") || d.includes("remains a=0") ||
+    d.includes("zero upto") || d.includes("zero up to") || d.includes("zero region") ||
+    d.includes("zero to t") || d.includes("zero till");
+
+  const hasCurve =
+    d.includes("parabola") || d.includes("concave") || d.includes("curves upward") ||
+    d.includes("curve up") || d.includes("curving") || d.includes("sweeping") ||
+    (d.includes("curve") && !d.includes("curved line"));
+
+  const hasLinear =
+    d.includes("increases linearly") || d.includes("linear increase") ||
+    d.includes("linearly") || d.includes("straight line") || d.includes("diagonal") ||
+    d.includes("linear from") || d.includes("increases linear");
+
+  const hasConstant =
+    (d.includes("constant") || d.includes("horizontal") || d.includes("flat") || d.includes("plateau"))
+    && !d.includes("not constant");
+
+  const hasJump =
+    d.includes("jump") || d.includes("abrupt") || d.includes("sudden") ||
+    d.includes("steps up") || d.includes("instantly") || d.includes("discontinuity");
+
+  const hasDrop =
+    d.includes("drop") || d.includes("falls to zero") || d.includes("goes to zero") ||
+    d.includes("back to zero") || d.includes("decreases to zero") || d.includes("falls back");
+
+  const hasLinearThenConstant =
+    (d.includes("then constant") || d.includes("then flat") || d.includes("then horizontal") ||
+     d.includes("constant after") || d.includes("flat after") || d.includes("levels off") ||
+     d.includes("becomes constant") || d.includes("then plateau"));
+
+  const hasConstantThenLinear =
+    (d.includes("constant then") || d.includes("flat then") || d.includes("plateau then") ||
+     d.includes("then linear") || d.includes("then increases linearly") ||
+     d.includes("then increases linear"));
+
   const zeroEnd = hasZeroRegion ? 0.32 : 0;
+  const jumpH   = 0.55;
+  const flatH   = 0.30; // height after jump for constant-then-linear (like graph C in original)
 
-  const hasCurve    = d.includes("parabola") || d.includes("concave up") ||
-                      d.includes("curves upward") || d.includes("curve");
-  const hasLinear   = d.includes("increases linearly") || d.includes("linearly with time") ||
-                      d.includes("linear increase") || d.includes("increases linear");
-  const hasConstant = d.includes("constant") && !d.includes("not constant");
-  const hasJump     = d.includes("jump") || d.includes("abrupt") || d.includes("sudden");
-  const hasDrop     = d.includes("drop") || d.includes("fall") || d.includes("goes to zero") ||
-                      d.includes("back to zero") || d.includes("decreases to zero");
-  const hasLinearAgain = d.includes("then increases linearly again") || d.includes("increases linearly again");
+  let lines  = [];
+  let curves = [];
 
-  // pick the jump height (mid-level)
-  const jumpH = 0.55;
-  const jumpH2 = 0.30; // lower level after drop
+  // ── Priority-ordered shape matching ──
 
-  let lines = [];    // {x1,y1,x2,y2}
-  let curves = [];   // SVG path strings
-
-  if (hasZeroRegion && hasCurve) {
-    // Graph A type: zero then parabola curving up
+  if (hasZeroRegion && hasCurve && !hasJump) {
+    // Graph A: zero flat → then parabola/curve sweeping up from axis
     lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
-    curves.push(`M ${px(zeroEnd)} ${py(0)} C ${px(zeroEnd+0.18)} ${py(0.04)}, ${px(0.82)} ${py(0.55)}, ${px(1.0)} ${py(0.95)}`);
-  } else if (hasZeroRegion && hasJump && hasLinearAgain && hasDrop) {
-    // Graph B type: zero → jump → linear → drop → linear again
-    lines.push({ x1:px(0), y1:py(0), x2:px(0.28), y2:py(0) });
-    lines.push({ x1:px(0.28), y1:py(0), x2:px(0.28), y2:py(jumpH) }); // jump up
-    lines.push({ x1:px(0.28), y1:py(jumpH), x2:px(0.50), y2:py(jumpH) }); // brief flat
-    lines.push({ x1:px(0.50), y1:py(jumpH), x2:px(0.51), y2:py(jumpH2) }); // drop down
-    lines.push({ x1:px(0.51), y1:py(jumpH2), x2:px(1.0), y2:py(0.90) }); // linear up
-  } else if (hasZeroRegion && hasJump && hasLinear && !hasConstant) {
-    // Graph C type: zero → jump → linear increasing
-    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
-    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(zeroEnd), y2:py(jumpH) });
-    lines.push({ x1:px(zeroEnd), y1:py(jumpH), x2:px(1.0), y2:py(0.95) });
+    curves.push(`M ${px(zeroEnd)} ${py(0)} C ${px(zeroEnd+0.15)} ${py(0.02)}, ${px(0.78)} ${py(0.52)}, ${px(1.0)} ${py(0.95)}`);
+
+  } else if (hasZeroRegion && hasJump && hasLinear && !hasConstant && !hasDrop) {
+    // Graph B: zero → jump to small positive value → increases linearly
+    lines.push({ x1:px(0),      y1:py(0),      x2:px(zeroEnd),  y2:py(0) });        // flat zero
+    lines.push({ x1:px(zeroEnd),y1:py(0),      x2:px(zeroEnd),  y2:py(flatH) });    // vertical jump
+    lines.push({ x1:px(zeroEnd),y1:py(flatH),  x2:px(1.0),      y2:py(0.92) });     // linear up
+
+  } else if (hasZeroRegion && hasConstantThenLinear) {
+    // Graph C: zero → constant flat → then linear increase (with or without explicit jump)
+    lines.push({ x1:px(0),       y1:py(0),     x2:px(zeroEnd),   y2:py(0) });       // zero region
+    lines.push({ x1:px(zeroEnd), y1:py(0),     x2:px(zeroEnd),   y2:py(flatH) });   // jump up
+    lines.push({ x1:px(zeroEnd), y1:py(flatH), x2:px(0.60),      y2:py(flatH) });   // flat constant
+    lines.push({ x1:px(0.60),    y1:py(flatH), x2:px(1.0),       y2:py(0.92) });    // linear up
+
+  } else if (hasZeroRegion && hasJump && hasConstant && !hasLinear && !hasDrop) {
+    // Graph D: zero → jump → constant flat plateau (stays high)
+    lines.push({ x1:px(0),       y1:py(0),     x2:px(zeroEnd),   y2:py(0) });
+    lines.push({ x1:px(zeroEnd), y1:py(0),     x2:px(zeroEnd),   y2:py(jumpH) });
+    lines.push({ x1:px(zeroEnd), y1:py(jumpH), x2:px(1.0),       y2:py(jumpH) });
+
   } else if (hasZeroRegion && hasJump && hasConstant && hasDrop) {
-    // Graph D type: zero → jump → constant plateau → drop to zero (stays zero)
-    lines.push({ x1:px(0), y1:py(0), x2:px(0.28), y2:py(0) });
-    lines.push({ x1:px(0.28), y1:py(0), x2:px(0.28), y2:py(jumpH) });
-    lines.push({ x1:px(0.28), y1:py(jumpH), x2:px(0.68), y2:py(jumpH) });
-    lines.push({ x1:px(0.68), y1:py(jumpH), x2:px(0.68), y2:py(0) });
-    lines.push({ x1:px(0.68), y1:py(0), x2:px(1.0), y2:py(0) });
-  } else if (hasZeroRegion && hasJump && hasConstant) {
-    // zero → jump → flat constant (stays at top)
-    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
-    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(zeroEnd), y2:py(jumpH) });
-    lines.push({ x1:px(zeroEnd), y1:py(jumpH), x2:px(1.0), y2:py(jumpH) });
+    // zero → jump → plateau → drop back to zero
+    lines.push({ x1:px(0),    y1:py(0),      x2:px(0.28),  y2:py(0) });
+    lines.push({ x1:px(0.28), y1:py(0),      x2:px(0.28),  y2:py(jumpH) });
+    lines.push({ x1:px(0.28), y1:py(jumpH),  x2:px(0.68),  y2:py(jumpH) });
+    lines.push({ x1:px(0.68), y1:py(jumpH),  x2:px(0.68),  y2:py(0) });
+    lines.push({ x1:px(0.68), y1:py(0),      x2:px(1.0),   y2:py(0) });
+
+  } else if (hasZeroRegion && hasLinearThenConstant) {
+    // zero → linear → constant (levels off)
+    lines.push({ x1:px(0),      y1:py(0),     x2:px(zeroEnd), y2:py(0) });
+    lines.push({ x1:px(zeroEnd),y1:py(0),     x2:px(0.60),    y2:py(jumpH) });
+    lines.push({ x1:px(0.60),   y1:py(jumpH), x2:px(1.0),     y2:py(jumpH) });
+
   } else if (hasZeroRegion && hasLinear) {
-    // zero → linear (no jump)
-    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
-    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(1.0), y2:py(0.92) });
+    // zero → linear (no jump, smooth start)
+    lines.push({ x1:px(0),      y1:py(0),  x2:px(zeroEnd), y2:py(0) });
+    lines.push({ x1:px(zeroEnd),y1:py(0),  x2:px(1.0),     y2:py(0.92) });
+
+  } else if (hasLinearThenConstant) {
+    // linear then levels off
+    lines.push({ x1:px(0),    y1:py(0),     x2:px(0.55), y2:py(jumpH) });
+    lines.push({ x1:px(0.55), y1:py(jumpH), x2:px(1.0),  y2:py(jumpH) });
+
+  } else if (hasConstantThenLinear) {
+    // flat then linear
+    lines.push({ x1:px(0),    y1:py(flatH), x2:px(0.45), y2:py(flatH) });
+    lines.push({ x1:px(0.45), y1:py(flatH), x2:px(1.0),  y2:py(0.92) });
+
   } else if (hasLinear) {
     // pure linear from origin
     lines.push({ x1:px(0), y1:py(0), x2:px(1.0), y2:py(0.92) });
+
   } else if (hasConstant && !hasLinear) {
-    // horizontal constant
+    // flat horizontal
     lines.push({ x1:px(0), y1:py(jumpH), x2:px(1.0), y2:py(jumpH) });
+
   } else if (hasCurve) {
     // parabola from origin
     curves.push(`M ${px(0)} ${py(0)} C ${px(0.3)} ${py(0.02)}, ${px(0.7)} ${py(0.5)}, ${px(1.0)} ${py(0.95)}`);
+
   } else {
     // default: linear from origin
     lines.push({ x1:px(0), y1:py(0), x2:px(1.0), y2:py(0.85) });
@@ -234,23 +284,19 @@ function GraphSVG({ desc, compact }) {
 
   return (
     <svg width={W} height={H} style={{ display:"block" }}>
-      {/* subtle grid */}
       {[0.25,0.5,0.75].map(f=>(
         <line key={"gx"+f} x1={px(f)} y1={14} x2={px(f)} y2={oy} stroke="#e8e8e8" strokeWidth={0.5} strokeDasharray="3,3"/>
       ))}
       {[0.33,0.66].map(f=>(
         <line key={"gy"+f} x1={ox} y1={py(f)} x2={W-6} y2={py(f)} stroke="#e8e8e8" strokeWidth={0.5} strokeDasharray="3,3"/>
       ))}
-      {/* axes */}
       <line x1={ox} y1={oy} x2={ox} y2={10} stroke="#222" strokeWidth={1.5}/>
       <polygon points={`${ox},10 ${ox-3.5},18 ${ox+3.5},18`} fill="#222"/>
       <line x1={ox} y1={oy} x2={W-5} y2={oy} stroke="#222" strokeWidth={1.5}/>
       <polygon points={`${W-5},${oy} ${W-13},${oy-3.5} ${W-13},${oy+3.5}`} fill="#222"/>
-      {/* labels */}
       <text x={ox-8} y={oy+fs+2} fontSize={fs} fill="#444" fontFamily="serif">O</text>
       <text x={W-8} y={oy+fs+2} fontSize={fs} fill="#333" fontFamily="serif" fontStyle="italic">{xLabel}</text>
       <text x={4} y={16} fontSize={fs} fill="#333" fontFamily="serif" fontStyle="italic">{yLabel}</text>
-      {/* graph lines */}
       {lines.map((l,i)=>(
         <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
           stroke="#1a237e" strokeWidth={lw} strokeLinecap="round" strokeLinejoin="round"/>
