@@ -851,9 +851,18 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const [model, setModel] = useState(savedModel || "gemini-2.0-flash");
   const [msg, setMsg] = useState("");
   const [showDrive, setShowDrive] = useState(false);
+  const [liveModels, setLiveModels] = useState([]);
 
   useEffect(() => { setDrive(savedDriveKey || ""); }, [savedDriveKey]);
   useEffect(() => { setModel(savedModel || "gemini-2.0-flash"); }, [savedModel]);
+
+  // Fetch live model list from server on mount
+  useEffect(() => {
+    fetch("/api/models")
+      .then(r => r.json())
+      .then(d => { if (d.models?.length) setLiveModels(d.models); })
+      .catch(() => {});
+  }, []);
 
   const save = async () => {
     await onSave(drive.trim(), model);
@@ -863,11 +872,27 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
 
   const maskKey = (k) => k.length > 8 ? k.slice(0,6) + "••••••••" + k.slice(-4) : k ? "••••••••" : "";
 
-  const MODELS = [
-    { id: "gemini-2.0-flash",      label: "Gemini 2.0 Flash",      limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best overall — fast, reliable, great for PDFs" },
-    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite",  limit: "1500 req/day", badge: "🚀 Fastest",      badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Fastest response, use if quota is tight" },
-    { id: "gemini-2.5-pro-exp-03-25", label: "Gemini 2.5 Pro", limit: "50 req/day", badge: "🧠 Smartest", badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Most accurate extraction, lower daily quota" },
-  ];
+  // Static fallback UI info — actual working models come from server dynamically
+  const MODEL_META = {
+    "gemini-2.5-flash":      { label: "Gemini 2.5 Flash",      badge: "⚡ Best",        badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Fastest + smartest — recommended" },
+    "gemini-2.5-flash-lite": { label: "Gemini 2.5 Flash Lite",  badge: "🚀 Lite",        badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Lighter, use if quota is tight" },
+    "gemini-2.5-pro":        { label: "Gemini 2.5 Pro",         badge: "🧠 Pro",         badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Most accurate, lower quota" },
+    "gemini-2.0-flash":      { label: "Gemini 2.0 Flash",       badge: "✅ Stable",      badgeColor: "#e65100", badgeBg: "#fff3e0", note: "Stable fallback" },
+    "gemini-2.0-flash-lite": { label: "Gemini 2.0 Flash Lite",  badge: "🔄 Fallback",    badgeColor: "#00695c", badgeBg: "#e0f2f1", note: "Lightweight fallback" },
+  };
+  const MODELS = liveModels.length > 0
+    ? liveModels.slice(0, 5).map((id, i) => ({
+        id,
+        label: MODEL_META[id]?.label || id,
+        badge: i === 0 ? "⚡ Best Available" : (MODEL_META[id]?.badge || "🔄 Available"),
+        badgeColor: i === 0 ? "#2e7d32" : (MODEL_META[id]?.badgeColor || "#555"),
+        badgeBg: i === 0 ? "#e8f5e9" : (MODEL_META[id]?.badgeBg || "#f5f5f5"),
+        note: MODEL_META[id]?.note || "Available on your API key",
+        limit: "free tier",
+      }))
+    : [
+        { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", badge: "⚡ Default", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Loading live models...", limit: "free tier" },
+      ];
 
   return (
     <div style={{ maxWidth:660 }}>
@@ -885,7 +910,7 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
             <div style={{ fontSize:12, color:"#888" }}>Switch models if you hit quota limits</div>
           </div>
           <span style={{ marginLeft:"auto", background:"#e8eaf6", color:"#3949ab", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>
-            Active: {MODELS.find(m => m.id === model)?.label || model}
+            Active: {MODEL_META[model]?.label || model}
           </span>
         </div>
 
