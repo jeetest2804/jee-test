@@ -80,6 +80,11 @@ async function getAvailableModels(apiKey) {
   }
 }
 
+/* ── /api/health — simple liveness check ── */
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
 /* ── /api/models — frontend can query what's available ── */
 app.get("/api/models", async (req, res) => {
   const apiKey = process.env.GEMINI_API_KEY;
