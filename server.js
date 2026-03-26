@@ -66,16 +66,16 @@ Rules:
 - Output pure JSON only, no explanation`;
 
   // Build model list: requested model first, then fallbacks
+  // Only models verified to work on free v1beta API
   const ALL_MODELS = [
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash-latest",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-002",
-    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.0-flash",           // FREE — 1500 req/day — most reliable
+    "gemini-2.0-flash-lite",      // FREE — 1500 req/day — faster/lighter
+    "gemini-1.5-flash",           // FREE — 1500 req/day — stable
+    "gemini-1.5-flash-8b",        // FREE — 1500 req/day — smallest/fastest
   ];
   const primary = requestedModel && ALL_MODELS.includes(requestedModel)
     ? requestedModel
-    : "gemini-2.0-flash-exp";
+    : "gemini-2.0-flash";
   const fallbacks = ALL_MODELS.filter(m => m !== primary);
   const models = [primary, ...fallbacks];
 
