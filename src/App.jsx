@@ -314,105 +314,164 @@ function GraphSVG({ desc, compact }) {
 function PhysicsDiagramSVG({ desc, compact }) {
   const d = desc.toLowerCase();
   const W = compact ? 200 : 300;
-  const H = compact ? 120 : 160;
+  const H = compact ? 140 : 190;
   const fs = compact ? 9 : 11;
   const fsb = compact ? 8 : 10;
 
-  // ── Pulley system ──
-  if (d.includes("pulley")) {
-    const cx = W/2, pr = compact ? 16 : 22;
-    const blockW = compact ? 28 : 38, blockH = compact ? 20 : 26;
-    const ropeTo = H - (compact ? 18 : 22);
-    const m1 = d.match(/(\d+\.?\d*)\s*kg.*?(\d+\.?\d*)\s*kg/) || [];
-    const m1v = m1[1] || "m₁", m2v = m1[2] || "m₂";
+  // Helper: parse all masses from description, returns array of numbers
+  function parseMasses() {
+    return [...d.matchAll(/(\d+\.?\d*)\s*kg/g)].map(m => parseFloat(m[1]));
+  }
+
+  // ── Pulley / Atwood machine ──
+  // Triggered by "pulley" OR "inextensible string" over "smooth" (Atwood)
+  const isPulley = d.includes("pulley") || 
+    (d.includes("inextensible") && (d.includes("smooth") || d.includes("massless")));
+
+  if (isPulley) {
+    const masses = parseMasses();
+    const m1 = masses[0] || 0.25;
+    const m2 = masses[1] || 0.80;
+    const m1label = masses[0] != null ? `${m1} kg` : "m₁";
+    const m2label = masses[1] != null ? `${m2} kg` : "m₂";
+
+    // Heavier block hangs lower — proportional to mass difference
+    const total = m1 + m2;
+    const cx = W / 2;
+    const pr = compact ? 14 : 20; // pulley radius
+    const pulleyY = pr + 10;
+    const ropeStartY = pulleyY + pr;
+
+    // Block sizes proportional to mass
+    const baseW = compact ? 26 : 36;
+    const baseH = compact ? 18 : 24;
+    const bW1 = baseW + (m1 / total) * (compact ? 16 : 22);
+    const bH1 = baseH + (m1 / total) * (compact ? 10 : 14);
+    const bW2 = baseW + (m2 / total) * (compact ? 16 : 22);
+    const bH2 = baseH + (m2 / total) * (compact ? 10 : 14);
+
+    // Heavier = lower. Range: 55%–85% of H
+    const maxRope = H - Math.max(bH1, bH2) - 8;
+    const minRope = ropeStartY + 18;
+    const ropeRange = maxRope - minRope;
+
+    // m1 left, m2 right
+    const rope1Len = minRope + (m2 / total) * ropeRange; // heavier m2 → m1 goes up → m1 rope shorter
+    const rope2Len = minRope + (m1 / total) * ropeRange; // lighter m1 → m2 goes down → m2 rope longer
+
+    const b1TopY = rope1Len;
+    const b2TopY = rope2Len;
+
     return (
       <svg width={W} height={H} style={{display:"block"}}>
         {/* ceiling */}
-        <rect x={cx-pr-4} y={6} width={(pr+4)*2} height={6} fill="#555"/>
         <line x1={0} y1={6} x2={W} y2={6} stroke="#555" strokeWidth={2}/>
+        <rect x={cx - pr - 4} y={2} width={(pr + 4) * 2} height={8} fill="#666"/>
         {/* pulley wheel */}
-        <circle cx={cx} cy={pr+10} r={pr} fill="white" stroke="#444" strokeWidth={compact?1.5:2}/>
-        <circle cx={cx} cy={pr+10} r={pr*0.3} fill="#aaa" stroke="#444" strokeWidth={1}/>
+        <circle cx={cx} cy={pulleyY} r={pr} fill="white" stroke="#444" strokeWidth={compact ? 1.5 : 2}/>
+        <circle cx={cx} cy={pulleyY} r={pr * 0.28} fill="#aaa" stroke="#555" strokeWidth={1}/>
         {/* ropes */}
-        <line x1={cx-pr} y1={pr+10} x2={cx-pr} y2={ropeTo} stroke="#555" strokeWidth={compact?1.5:2}/>
-        <line x1={cx+pr} y1={pr+10} x2={cx+pr} y2={ropeTo} stroke="#555" strokeWidth={compact?1.5:2}/>
-        {/* blocks */}
-        <rect x={cx-pr-blockW/2} y={ropeTo} width={blockW} height={blockH} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={cx-pr} y={ropeTo+blockH/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1v} kg</text>
-        <rect x={cx+pr-blockW/2} y={ropeTo} width={blockW} height={blockH} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={cx+pr} y={ropeTo+blockH/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2v} kg</text>
+        <line x1={cx - pr} y1={pulleyY} x2={cx - pr} y2={b1TopY} stroke="#555" strokeWidth={compact ? 1.5 : 2}/>
+        <line x1={cx + pr} y1={pulleyY} x2={cx + pr} y2={b2TopY} stroke="#555" strokeWidth={compact ? 1.5 : 2}/>
+        {/* block 1 (left, lighter if m1<m2) */}
+        <rect x={cx - pr - bW1 / 2} y={b1TopY} width={bW1} height={bH1}
+          fill="#90caf9" stroke="#1565c0" strokeWidth={compact ? 1.5 : 2} rx={3}/>
+        <text x={cx - pr} y={b1TopY + bH1 / 2 + fsb * 0.4} textAnchor="middle"
+          fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1label}</text>
+        {/* block 2 (right, heavier if m2>m1) */}
+        <rect x={cx + pr - bW2 / 2} y={b2TopY} width={bW2} height={bH2}
+          fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact ? 1.5 : 2} rx={3}/>
+        <text x={cx + pr} y={b2TopY + bH2 / 2 + fsb * 0.4} textAnchor="middle"
+          fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2label}</text>
       </svg>
     );
   }
 
   // ── Horizontal blocks with forces ──
   if (d.includes("block") || d.includes("surface")) {
-    const masses = [...d.matchAll(/(\d+\.?\d*)\s*kg/g)].map(m=>m[0]);
-    const forces = [...d.matchAll(/[fF][\d]?\s*=\s*(\d+)\s*n/g)].map(m=>m[0].toUpperCase());
-    const f1val = d.match(/[fF]1\s*=\s*(\d+)/) ? d.match(/[fF]1\s*=\s*(\d+)/)[1]+"N" : forces[0]||"F₁";
-    const f2val = d.match(/[fF]2\s*=\s*(\d+)/) ? d.match(/[fF]2\s*=\s*(\d+)/)[1]+"N" : forces[1]||"F₂";
+    const masses = parseMasses();
+    const m1 = masses[0] || 1, m2 = masses[1] || 1;
+    const m1label = masses[0] != null ? `${m1} kg` : "m₁";
+    const m2label = masses[1] != null ? `${m2} kg` : "m₂";
+
+    const f1match = d.match(/f1\s*=\s*(\d+)|(\d+)\s*n.*?(?:left|push)/);
+    const f2match = d.match(/f2\s*=\s*(\d+)|(\d+)\s*n.*?(?:right)/);
+    // Also try plain "XN pushes" or "force FX=YN"
+    const forceNums = [...d.matchAll(/(\d+)\s*n/g)].map(m => m[1]);
+    const f1val = d.match(/f1\s*=\s*(\d+)/)?.[1] || forceNums[0] || "F₁";
+    const f2val = d.match(/f2\s*=\s*(\d+)/)?.[1] || forceNums[1] || "F₂";
+
     const groundY = H - (compact ? 22 : 30);
-    const blockH2 = compact ? 28 : 38, blockW1 = compact ? 40 : 55, blockW2 = compact ? 48 : 65;
+    const blockH2 = compact ? 30 : 40;
+
+    // Block WIDTH proportional to mass
+    const totalMass = m1 + m2;
+    const minBW = compact ? 32 : 44;
+    const maxBW = compact ? 62 : 82;
+    const blockW1 = minBW + (m1 / totalMass) * (maxBW - minBW);
+    const blockW2 = minBW + (m2 / totalMass) * (maxBW - minBW);
+
     const gap = compact ? 4 : 6;
     const totalW = blockW1 + gap + blockW2;
     const startX = (W - totalW) / 2;
     const b1x = startX, b2x = startX + blockW1 + gap;
     const by = groundY - blockH2;
-    const m1text = masses[0]||"m₁", m2text = masses[1]||"m₂";
-    const arrowLen = compact ? 32 : 44;
+    const arrowLen = compact ? 30 : 42;
+
     return (
       <svg width={W} height={H} style={{display:"block"}}>
         {/* ground */}
         <line x1={0} y1={groundY} x2={W} y2={groundY} stroke="#555" strokeWidth={1.5}/>
-        <line x1={0} y1={groundY} x2={W} y2={groundY+compact?5:7} stroke="#ccc" strokeWidth={1}/>
-        {[...Array(7)].map((_,i)=>(
-          <line key={i} x1={i*(W/6)} y1={groundY} x2={i*(W/6)-(compact?5:7)} y2={groundY+(compact?5:7)} stroke="#bbb" strokeWidth={1}/>
+        {[...Array(8)].map((_,i)=>(
+          <line key={i} x1={i*(W/7)} y1={groundY} x2={i*(W/7)-(compact?5:7)} y2={groundY+(compact?5:7)} stroke="#bbb" strokeWidth={1}/>
         ))}
-        {/* blocks */}
+        {/* block 1 */}
         <rect x={b1x} y={by} width={blockW1} height={blockH2} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={b1x+blockW1/2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1text}</text>
+        <text x={b1x+blockW1/2} y={by+blockH2/2+fsb*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1label}</text>
+        {/* block 2 */}
         <rect x={b2x} y={by} width={blockW2} height={blockH2} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={b2x+blockW2/2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2text}</text>
+        <text x={b2x+blockW2/2} y={by+blockH2/2+fsb*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2label}</text>
         {/* F1 arrow from left */}
         <line x1={b1x-arrowLen} y1={by+blockH2/2} x2={b1x-2} y2={by+blockH2/2} stroke="#e53935" strokeWidth={compact?2:2.5}/>
-        <polygon points={`${b1x-2},${by+blockH2/2} ${b1x-arrowLen*0.3+b1x-arrowLen},${by+blockH2/2-4} ${b1x-arrowLen*0.3+b1x-arrowLen},${by+blockH2/2+4}`}
-          transform={`rotate(180,${b1x-2},${by+blockH2/2})`} fill="#e53935"/>
         <polygon points={`${b1x-2},${by+blockH2/2} ${b1x-10},${by+blockH2/2-4} ${b1x-10},${by+blockH2/2+4}`} fill="#e53935"/>
-        <text x={b1x-arrowLen/2} y={by+blockH2/2-5} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f1val}</text>
+        <text x={b1x-arrowLen/2} y={by+blockH2/2-6} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f1val}N</text>
         {/* F2 arrow from right */}
         <line x1={b2x+blockW2+2} y1={by+blockH2/2} x2={b2x+blockW2+arrowLen} y2={by+blockH2/2} stroke="#e53935" strokeWidth={compact?2:2.5}/>
-        <polygon points={`${b2x+blockW2+2},${by+blockH2/2} ${b2x+blockW2+10},${by+blockH2/2-4} ${b2x+blockW2+10},${by+blockH2/2+4}`} fill="#e53935"/>
-        <text x={b2x+blockW2+arrowLen/2+2} y={by+blockH2/2-5} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f2val}</text>
+        <polygon points={`${b2x+blockW2+arrowLen},${by+blockH2/2} ${b2x+blockW2+arrowLen-8},${by+blockH2/2-4} ${b2x+blockW2+arrowLen-8},${by+blockH2/2+4}`} fill="#e53935"/>
+        <text x={b2x+blockW2+arrowLen/2+2} y={by+blockH2/2-6} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f2val}N</text>
       </svg>
     );
   }
 
   // ── String / two masses on surface ──
   if (d.includes("string") && d.includes("mass")) {
-    const W2=W, H2=H;
-    const groundY = H2-(compact?22:30);
-    const blockH2=compact?26:34, blockW2=compact?36:48;
-    const cx1=W2*0.25, cx2=W2*0.75;
+    const masses = parseMasses();
+    const m1 = masses[0] || 1, m2 = masses[1] || 1;
+    const total = m1 + m2;
+    const groundY = H-(compact?22:30);
+    const blockH2=compact?26:34;
+    const minBW = compact ? 30 : 40, maxBW = compact ? 54 : 72;
+    const bW1 = minBW + (m1/total)*(maxBW-minBW);
+    const bW2 = minBW + (m2/total)*(maxBW-minBW);
+    const cx1=W*0.28, cx2=W*0.72;
     const by=groundY-blockH2;
-    const masses=[...d.matchAll(/(\d+\.?\d*)\s*kg/g)].map(m=>m[1]);
-    const m1=masses[0]||"m₁", m2=masses[1]||"m₂";
     return (
-      <svg width={W2} height={H2} style={{display:"block"}}>
-        <line x1={0} y1={groundY} x2={W2} y2={groundY} stroke="#555" strokeWidth={1.5}/>
+      <svg width={W} height={H} style={{display:"block"}}>
+        <line x1={0} y1={groundY} x2={W} y2={groundY} stroke="#555" strokeWidth={1.5}/>
         {[...Array(8)].map((_,i)=>(
-          <line key={i} x1={i*(W2/7)} y1={groundY} x2={i*(W2/7)-5} y2={groundY+5} stroke="#bbb" strokeWidth={1}/>
+          <line key={i} x1={i*(W/7)} y1={groundY} x2={i*(W/7)-5} y2={groundY+5} stroke="#bbb" strokeWidth={1}/>
         ))}
-        <rect x={cx1-blockW2/2} y={by} width={blockW2} height={blockH2} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={cx1} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1} kg</text>
-        <line x1={cx1+blockW2/2} y1={by+blockH2/2} x2={cx2-blockW2/2} y2={by+blockH2/2} stroke="#555" strokeWidth={compact?1.5:2}/>
-        <rect x={cx2-blockW2/2} y={by} width={blockW2} height={blockH2} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
-        <text x={cx2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2} kg</text>
-        <text x={W2/2} y={by-4} textAnchor="middle" fontSize={fsb} fill="#555" fontFamily="sans-serif">string</text>
+        <rect x={cx1-bW1/2} y={by} width={bW1} height={blockH2} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx1} y={by+blockH2/2+fsb*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1} kg</text>
+        <line x1={cx1+bW1/2} y1={by+blockH2/2} x2={cx2-bW2/2} y2={by+blockH2/2} stroke="#555" strokeWidth={compact?1.5:2}/>
+        <rect x={cx2-bW2/2} y={by} width={bW2} height={blockH2} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx2} y={by+blockH2/2+fsb*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2} kg</text>
+        <text x={W/2} y={by-4} textAnchor="middle" fontSize={fsb} fill="#555" fontFamily="sans-serif">string</text>
       </svg>
     );
   }
 
-  // ── Force diagram (generic) ──
+  // ── Fallback ──
   const cx = W/2, cy = H/2;
   return (
     <svg width={W} height={H} style={{display:"block"}}>
@@ -431,13 +490,15 @@ function PhysicsDiagramSVG({ desc, compact }) {
 ══════════════════════════════════════════ */
 function getDiagramType(desc) {
   const d = desc.toLowerCase();
-  const isGraph = d.includes("graph") || d.includes("a-t") || d.includes("v-t") ||
+  const isPhysics = d.includes("block") || d.includes("pulley") || d.includes("surface") ||
+    d.includes("inextensible") || d.includes("smooth pulley") || d.includes("massless pulley") ||
+    d.includes("string") || d.includes("force") || d.includes("mass") || d.includes("atwood");
+  const isGraph = !isPhysics && (d.includes("graph") || d.includes("a-t") || d.includes("v-t") ||
     d.includes("acceleration") || d.includes("velocity") ||
     d.includes("increases linearly") || d.includes("parabola") ||
-    d.includes("concave") || d.includes("constant") && d.includes("linear") ||
-    d.includes("straight line") || d.includes("axis");
-  const isPhysics = d.includes("block") || d.includes("pulley") || d.includes("surface") ||
-    d.includes("string") || d.includes("force") || d.includes("mass");
+    d.includes("concave") || (d.includes("constant") && d.includes("linear")) ||
+    d.includes("straight line") || d.includes("axis"));
+  if (isPhysics) return "physics";
   if (isGraph) return "graph";
   if (isPhysics) return "physics";
   return "text";
