@@ -1406,155 +1406,365 @@ function Countdown({ target }) {
    TEST SCREEN  (NTA-style)
 ───────────────────────────────────────────── */
 const Q_STATUS = { NV:"nv", NA:"na", ANS:"ans", MR:"mr", AMR:"amr" };
-const Q_COLORS = { nv:"#9e9e9e", na:"#e53935", ans:"#43a047", mr:"#7b1fa2", amr:"#7b1fa2" };
+const Q_COLORS = { nv:"#808080", na:"#c0392b", ans:"#27ae60", mr:"#8e44ad", amr:"#8e44ad" };
 
+/* ─────────────────────────────────────────────
+   TEST SCREEN  — NTA JEE style
+───────────────────────────────────────────── */
 function TestScreen({ test, student, onSubmit }) {
-  const qs = test.questions || DEMO_QUESTIONS;
+  const allQs = test.questions || DEMO_QUESTIONS;
   const draftKey = `draft__${test.id}__${student.name}`;
-
   const savedDraft = sessionGet(draftKey) || {};
-  const [idx, setIdx] = useState(savedDraft.idx ?? 0);
+
+  // Subject sections — Physics, Chemistry, Mathematics (in order)
+  const SECTION_ORDER = ["Physics", "Chemistry", "Mathematics"];
+  const subjects = SECTION_ORDER.filter(s => allQs.some(q => q.subject === s));
+  // Add any other subjects not in the order list
+  allQs.forEach(q => { if (!subjects.includes(q.subject)) subjects.push(q.subject); });
+
+  const [activeSub, setActiveSub] = useState(savedDraft.activeSub || subjects[0]);
+  // Global index across ALL questions
+  const [globalIdx, setGlobalIdx] = useState(savedDraft.globalIdx ?? 0);
   const [answers, setAnswers] = useState(savedDraft.answers || {});
   const [intInputs, setIntInputs] = useState(savedDraft.intInputs || {});
   const [qStatus, setQStatus] = useState(() => {
     if (savedDraft.qStatus) return savedDraft.qStatus;
-    const s={}; qs.forEach((_,i)=>s[i]=i===0?Q_STATUS.NA:Q_STATUS.NV); return s;
+    const s = {}; allQs.forEach((_, i) => s[i] = Q_STATUS.NV); return s;
   });
-  const [timeLeft, setTimeLeft] = useState(savedDraft.timeLeft ?? (test.durationMins||180)*60);
+  const [timeLeft, setTimeLeft] = useState(savedDraft.timeLeft ?? (test.durationMins || 180) * 60);
   const [confirm, setConfirm] = useState(false);
 
+  // Questions for active subject
+  const subQs = allQs.map((q, gi) => ({ ...q, gi })).filter(q => q.subject === activeSub);
+  // Current global index limited to active subject
+  const curSubQ = subQs.find(q => q.gi === globalIdx) || subQs[0];
+  const cur = curSubQ ? allQs[curSubQ.gi] : allQs[0];
+  const curGi = curSubQ ? curSubQ.gi : 0;
+
+  // When switching subject tab, go to first question of that subject
+  const switchSubject = (sub) => {
+    setActiveSub(sub);
+    const firstQ = allQs.findIndex(q => q.subject === sub);
+    if (firstQ !== -1) {
+      if (qStatus[firstQ] === Q_STATUS.NV) setQStatus(p => ({ ...p, [firstQ]: Q_STATUS.NA }));
+      setGlobalIdx(firstQ);
+    }
+  };
+
+  // Mark current question as visited when entering
   useEffect(() => {
-    sessionSet(draftKey, { idx, answers, intInputs, qStatus, timeLeft });
-  }, [idx, answers, intInputs, qStatus, timeLeft]);
+    setQStatus(p => {
+      if (p[globalIdx] === Q_STATUS.NV) return { ...p, [globalIdx]: Q_STATUS.NA };
+      return p;
+    });
+  }, [globalIdx]);
 
   useEffect(() => {
-    const t = setInterval(()=>setTimeLeft(p=>{ if(p<=1){ clearInterval(t); doSubmit(); return 0; } return p-1; }), 1000);
-    return ()=>clearInterval(t);
+    sessionSet(draftKey, { activeSub, globalIdx, answers, intInputs, qStatus, timeLeft });
+  }, [activeSub, globalIdx, answers, intInputs, qStatus, timeLeft]);
+
+  useEffect(() => {
+    const t = setInterval(() => setTimeLeft(p => {
+      if (p <= 1) { clearInterval(t); doSubmit(); return 0; }
+      return p - 1;
+    }), 1000);
+    return () => clearInterval(t);
   }, []);
 
-  const cur = qs[idx];
-  const setQS = (i, s) => setQStatus(p=>({...p,[i]:s}));
+  const setQS = (gi, s) => setQStatus(p => ({ ...p, [gi]: s }));
 
-  const saveNext = (mark=false) => {
-    const ans = cur.type==="integer" ? intInputs[idx] : answers[idx];
-    const has = ans!==undefined && ans!==null && ans!=="";
-    setQS(idx, has ? (mark?Q_STATUS.AMR:Q_STATUS.ANS) : (mark?Q_STATUS.MR:Q_STATUS.NA));
-    const nxt = idx+1;
-    if (nxt < qs.length) { if(qStatus[nxt]===Q_STATUS.NV) setQS(nxt,Q_STATUS.NA); setIdx(nxt); }
+  const saveAndNext = (mark = false) => {
+    const ans = cur.type === "integer" ? intInputs[curGi] : answers[curGi];
+    const has = ans !== undefined && ans !== null && ans !== "";
+    const newStatus = has ? (mark ? Q_STATUS.AMR : Q_STATUS.ANS) : (mark ? Q_STATUS.MR : Q_STATUS.NA);
+    setQS(curGi, newStatus);
+
+    // Find next question in current subject
+    const curPosInSub = subQs.findIndex(q => q.gi === curGi);
+    if (curPosInSub < subQs.length - 1) {
+      const nextGi = subQs[curPosInSub + 1].gi;
+      setGlobalIdx(nextGi);
+    }
   };
 
   const doSubmit = () => {
     const finalAns = {};
-    qs.forEach((q,i) => { finalAns[i] = q.type==="integer" ? parseFloat(intInputs[i]) : answers[i]; });
+    allQs.forEach((q, i) => {
+      finalAns[i] = q.type === "integer" ? parseFloat(intInputs[i]) : answers[i];
+    });
     sessionDel(draftKey);
-    onSubmit({ answers:finalAns, qStatuses:qStatus, timeTaken:(test.durationMins||180)*60 - timeLeft });
+    onSubmit({ answers: finalAns, qStatuses: qStatus, timeTaken: (test.durationMins || 180) * 60 - timeLeft });
   };
 
-  const counts = Object.values(qStatus).reduce((a,s)=>{a[s]=(a[s]||0)+1;return a;},{});
-  const timerC = timeLeft<600?"#e53935":timeLeft<1800?"#ff9800":"#4fc3f7";
-  const subjects = [...new Set(qs.map(q=>q.subject))];
+  // Count from answers/intInputs directly — fixes stale state issue
+  const answeredCount = allQs.filter((q, i) => {
+    const a = q.type === "integer" ? intInputs[i] : answers[i];
+    return a !== undefined && a !== null && a !== "" && !(typeof a === "number" && isNaN(a));
+  }).length;
+
+  const counts = Object.values(qStatus).reduce((a, s) => { a[s] = (a[s] || 0) + 1; return a; }, {});
+  // Override answered count with the reliable direct calculation
+  counts[Q_STATUS.ANS] = answeredCount;
+
+  const timerC = timeLeft < 600 ? "#e53935" : timeLeft < 1800 ? "#ff9800" : "#27ae60";
+
+  const subjectColor = { Physics: "#1a237e", Chemistry: "#1b5e20", Mathematics: "#4a148c" };
+  const subjectBg = { Physics: "#e8eaf6", Chemistry: "#e8f5e9", Mathematics: "#f3e5f5" };
 
   return (
-    <div style={{ minHeight:"100vh", background:"#f0f2f5", fontFamily:"Segoe UI, sans-serif", display:"flex", flexDirection:"column" }}>
-      <div style={{ background:"#1a237e", color:"white", padding:"0 20px", height:52, display:"flex", alignItems:"center", gap:16, flexShrink:0 }}>
-        <span style={{ fontWeight:800, color:"#ffca28", fontSize:14 }}>NTA</span>
-        <span style={{ fontWeight:700, fontSize:13, flex:1 }}>{test.title}</span>
-        <span style={{ fontSize:12, color:"rgba(255,255,255,0.6)" }}>👤 {student.name}</span>
-        <div style={{ background:"#0d47a1", borderRadius:8, padding:"4px 14px", fontWeight:800, fontSize:16, color:timerC, fontVariantNumeric:"tabular-nums" }}>⏱ {fmt(timeLeft)}</div>
-      </div>
-      <div style={{ background:"#283593", display:"flex", padding:"0 16px", gap:2 }}>
-        {subjects.map(s=>(
-          <button key={s} onClick={()=>setIdx(qs.findIndex(q=>q.subject===s))}
-            style={{ padding:"9px 16px", border:"none", borderRadius:"6px 6px 0 0", fontWeight:700, fontSize:12, cursor:"pointer",
-              background:cur.subject===s?"white":"transparent", color:cur.subject===s?"#1a237e":"rgba(255,255,255,0.65)" }}>
-            {s}
-          </button>
-        ))}
+    <div style={{ height:"100vh", background:"#f0f2f5", fontFamily:"Arial, sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+      {/* ── Top Header ── */}
+      <div style={{ background:"#1a237e", color:"white", padding:"0 16px", height:50, display:"flex", alignItems:"center", gap:12, flexShrink:0, borderBottom:"3px solid #ffca28" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ background:"#ffca28", color:"#1a237e", fontWeight:900, fontSize:13, padding:"2px 8px", borderRadius:4 }}>NTA</div>
+          <span style={{ fontWeight:700, fontSize:13, opacity:0.9 }}>JEE (Main)</span>
+        </div>
+        <div style={{ flex:1, textAlign:"center", fontWeight:700, fontSize:14, opacity:0.95 }}>{test.title}</div>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <div style={{ fontSize:12, opacity:0.8 }}>👤 {student.name}</div>
+          <div style={{ background: timeLeft < 600 ? "#c62828" : "#0d47a1", borderRadius:6, padding:"5px 12px", fontWeight:900, fontSize:15, color: timerC, fontVariantNumeric:"tabular-nums", border:"1px solid rgba(255,255,255,0.3)" }}>
+            ⏱ {fmt(timeLeft)}
+          </div>
+        </div>
       </div>
 
+      {/* ── Subject Tabs ── */}
+      <div style={{ background:"#283593", display:"flex", borderBottom:"1px solid #1a237e", flexShrink:0 }}>
+        {subjects.map(s => {
+          const sQs = allQs.filter(q => q.subject === s);
+          const ans = sQs.filter((q, _) => {
+            const gi = allQs.indexOf(q);
+            const a = q.type === "integer" ? intInputs[gi] : answers[gi];
+            return a !== undefined && a !== null && a !== "";
+          }).length;
+          return (
+            <button key={s} onClick={() => switchSubject(s)}
+              style={{ padding:"10px 20px", border:"none", borderBottom: activeSub === s ? "3px solid #ffca28" : "3px solid transparent",
+                fontWeight:700, fontSize:13, cursor:"pointer", transition:"all 0.15s",
+                background: activeSub === s ? "rgba(255,255,255,0.15)" : "transparent",
+                color: activeSub === s ? "white" : "rgba(255,255,255,0.6)" }}>
+              {s}
+              <span style={{ marginLeft:6, background: activeSub === s ? "#ffca28" : "rgba(255,255,255,0.2)", color: activeSub === s ? "#1a237e" : "white", borderRadius:10, padding:"1px 7px", fontSize:11, fontWeight:800 }}>
+                {ans}/{sQs.length}
+              </span>
+            </button>
+          );
+        })}
+        <div style={{ flex:1 }} />
+        <div style={{ padding:"0 16px", display:"flex", alignItems:"center", gap:16, fontSize:12, color:"rgba(255,255,255,0.7)" }}>
+          <span>Total: <b style={{ color:"white" }}>{answeredCount}/{allQs.length}</b> answered</span>
+        </div>
+      </div>
+
+      {/* ── Main Content ── */}
       <div style={{ display:"flex", flex:1, minHeight:0 }}>
-        <div style={{ flex:1, padding:20, overflowY:"auto", minWidth:0 }}>
-          <div style={{ background:"white", borderRadius:14, padding:26, boxShadow:"0 2px 10px rgba(0,0,0,0.07)", marginBottom:14 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:14 }}>
-              <div style={{ fontWeight:800, color:"#1a237e", fontSize:16 }}>
-                Q{idx+1}
-                <span style={{ fontSize:11, background:"#e8eaf6", color:"#3949ab", borderRadius:6, padding:"2px 8px", marginLeft:8 }}>{cur.subject}</span>
-                <span style={{ fontSize:11, background:cur.type==="integer"?"#fff3e0":"#e3f2fd", color:cur.type==="integer"?"#e65100":"#1565c0", borderRadius:6, padding:"2px 8px", marginLeft:6 }}>{cur.type==="integer"?"Integer":"MCQ"}</span>
-              </div>
-              <span style={{ fontSize:12, color:"#777" }}>+{cur.marks} / {cur.negative}</span>
+
+        {/* Question Panel */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          {/* Question number bar */}
+          <div style={{ background:"#e8eaf6", borderBottom:"1px solid #c5cae9", padding:"8px 16px", display:"flex", alignItems:"center", gap:12, flexShrink:0 }}>
+            <span style={{ fontWeight:800, color:"#1a237e", fontSize:14 }}>
+              Question {subQs.findIndex(q => q.gi === curGi) + 1} of {subQs.length}
+            </span>
+            <span style={{ background: subjectColor[activeSub] || "#1a237e", color:"white", borderRadius:4, padding:"2px 10px", fontSize:11, fontWeight:700 }}>
+              {activeSub}
+            </span>
+            <span style={{ background: cur.type === "integer" ? "#fff3e0" : "#e3f2fd", color: cur.type === "integer" ? "#e65100" : "#1565c0", borderRadius:4, padding:"2px 10px", fontSize:11, fontWeight:700 }}>
+              {cur.type === "integer" ? "Numerical" : "MCQ"}
+            </span>
+            <span style={{ marginLeft:"auto", fontSize:12, color:"#3949ab", fontWeight:700 }}>
+              Marks: +{Number(cur.marks)||4} | Negative: {Number(cur.negative)||"-1"}
+            </span>
+          </div>
+
+          {/* Question body */}
+          <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
+            <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
+              <p style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
+                {renderMath(cur.text)}
+              </p>
             </div>
-            <p style={{ fontSize:14, lineHeight:1.85, color:"#222", margin:"0 0 22px", whiteSpace:"pre-wrap" }}>{renderMath(cur.text)}</p>
-            {cur.type==="mcq" ? (
+
+            {cur.type === "mcq" ? (
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                {cur.options.map((opt,oi)=>{
-                  const sel = answers[idx]===oi;
+                {cur.options.map((opt, oi) => {
+                  const sel = answers[curGi] === oi;
                   return (
-                    <div key={oi} onClick={()=>setAnswers(p=>({...p,[idx]:oi}))}
-                      style={{ padding:"12px 16px", borderRadius:10, border:`2px solid ${sel?"#3949ab":"#e8e8e8"}`, background:sel?"#e8eaf6":"white", cursor:"pointer", display:"flex", gap:12, alignItems:"center" }}>
-                      <div style={{ width:26, height:26, borderRadius:"50%", background:sel?"#3949ab":"#f0f0f0", color:sel?"white":"#666", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:12, flexShrink:0 }}>{["A","B","C","D"][oi]}</div>
-                      <span style={{ fontSize:13 }}>{renderMath(opt)}</span>
+                    <div key={oi} onClick={() => setAnswers(p => ({ ...p, [curGi]: oi }))}
+                      style={{ padding:"13px 18px", borderRadius:6, border: `2px solid ${sel ? "#1a237e" : "#ddd"}`,
+                        background: sel ? "#e8eaf6" : "white", cursor:"pointer",
+                        display:"flex", gap:14, alignItems:"center", transition:"all 0.1s",
+                        boxShadow: sel ? "0 0 0 1px #1a237e" : "0 1px 2px rgba(0,0,0,0.04)" }}>
+                      <div style={{ width:30, height:30, borderRadius:"50%",
+                        background: sel ? "#1a237e" : "white", color: sel ? "white" : "#555",
+                        border: `2px solid ${sel ? "#1a237e" : "#bbb"}`,
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        fontWeight:800, fontSize:13, flexShrink:0 }}>
+                        {["A","B","C","D"][oi]}
+                      </div>
+                      <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
+                        {renderMath(opt)}
+                      </span>
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div>
-                <div style={{ fontSize:13, color:"#666", fontWeight:600, marginBottom:10 }}>Enter your integer answer:</div>
+              <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px" }}>
+                <div style={{ fontSize:13, color:"#555", fontWeight:600, marginBottom:12 }}>Enter your answer (integer only):</div>
                 <input
                   type="number"
-                  value={intInputs[idx]??""} 
-                  onChange={e=>setIntInputs(p=>({...p,[idx]:e.target.value}))}
-                  placeholder="Type answer here..."
-                  style={{ padding:"14px 20px", borderRadius:12, border:"2px solid #3949ab", fontSize:20, fontWeight:700, width:"100%", maxWidth:280, outline:"none", textAlign:"center", display:"block", background:"#f0f4ff", boxSizing:"border-box" }}
+                  value={intInputs[curGi] ?? ""}
+                  onChange={e => setIntInputs(p => ({ ...p, [curGi]: e.target.value }))}
+                  placeholder="Type your answer..."
+                  style={{ padding:"14px 20px", borderRadius:6, border:"2px solid #1a237e", fontSize:22, fontWeight:700,
+                    width:"100%", maxWidth:300, outline:"none", textAlign:"center", display:"block",
+                    background:"#f8f9ff", boxSizing:"border-box", fontFamily:"Arial, sans-serif" }}
                 />
-                <div style={{ fontSize:12, color:"#888", marginTop:8 }}>Only integer values accepted (e.g. 12, 24, 100)</div>
+                <div style={{ fontSize:12, color:"#888", marginTop:8 }}>
+                  Type numeric value only. No decimals accepted.
+                </div>
               </div>
             )}
           </div>
 
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            <Btn color="#43a047" onClick={()=>saveNext(false)}>SAVE AND NEXT</Btn>
-            <Btn color="#ff9800" onClick={()=>saveNext(true)}>SAVE AND MARK REVIEW</Btn>
-            <Btn color="#607d8b" outline onClick={()=>{ setAnswers(p=>{const n={...p};delete n[idx];return n;}); setIntInputs(p=>{const n={...p};delete n[idx];return n;}); }}>CLEAR</Btn>
-            <Btn color="#7b1fa2" onClick={()=>{ setQS(idx,Q_STATUS.MR); if(idx+1<qs.length)setIdx(idx+1); }}>MARK AND NEXT</Btn>
-          </div>
-          <div style={{ display:"flex", justifyContent:"space-between", marginTop:12 }}>
-            <button disabled={idx===0} onClick={()=>setIdx(i=>i-1)} style={{ padding:"9px 18px", borderRadius:8, border:"2px solid #ddd", background:"white", cursor:idx===0?"default":"pointer", opacity:idx===0?0.4:1, fontWeight:600, fontSize:13 }}>BACK</button>
-            <button onClick={()=>setConfirm(true)} style={{ padding:"9px 22px", borderRadius:8, border:"none", background:"#e53935", color:"white", fontWeight:800, cursor:"pointer", fontSize:13 }}>SUBMIT TEST</button>
-            <button disabled={idx===qs.length-1} onClick={()=>setIdx(i=>i+1)} style={{ padding:"9px 18px", borderRadius:8, border:"2px solid #ddd", background:"white", cursor:idx===qs.length-1?"default":"pointer", opacity:idx===qs.length-1?0.4:1, fontWeight:600, fontSize:13 }}>NEXT</button>
+          {/* Action buttons */}
+          <div style={{ background:"#f5f5f5", borderTop:"1px solid #e0e0e0", padding:"10px 16px", flexShrink:0 }}>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:10 }}>
+              <button onClick={() => saveAndNext(false)}
+                style={{ padding:"10px 18px", borderRadius:4, border:"none", background:"#2e7d32", color:"white", fontWeight:700, fontSize:12, cursor:"pointer", letterSpacing:0.5 }}>
+                SAVE & NEXT
+              </button>
+              <button onClick={() => saveAndNext(true)}
+                style={{ padding:"10px 18px", borderRadius:4, border:"none", background:"#f57f17", color:"white", fontWeight:700, fontSize:12, cursor:"pointer", letterSpacing:0.5 }}>
+                SAVE & MARK FOR REVIEW
+              </button>
+              <button onClick={() => { setAnswers(p => { const n = { ...p }; delete n[curGi]; return n; }); setIntInputs(p => { const n = { ...p }; delete n[curGi]; return n; }); setQS(curGi, Q_STATUS.NA); }}
+                style={{ padding:"10px 18px", borderRadius:4, border:"2px solid #757575", background:"white", color:"#424242", fontWeight:700, fontSize:12, cursor:"pointer", letterSpacing:0.5 }}>
+                CLEAR RESPONSE
+              </button>
+              <button onClick={() => { setQS(curGi, Q_STATUS.MR); const next = subQs[subQs.findIndex(q => q.gi === curGi) + 1]; if (next) setGlobalIdx(next.gi); }}
+                style={{ padding:"10px 18px", borderRadius:4, border:"none", background:"#6a1b9a", color:"white", fontWeight:700, fontSize:12, cursor:"pointer", letterSpacing:0.5 }}>
+                MARK FOR REVIEW & NEXT
+              </button>
+            </div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <button
+                onClick={() => {
+                  const curPosInSub = subQs.findIndex(q => q.gi === curGi);
+                  if (curPosInSub > 0) setGlobalIdx(subQs[curPosInSub - 1].gi);
+                  else {
+                    // Go to previous subject last question
+                    const subIdx = subjects.indexOf(activeSub);
+                    if (subIdx > 0) {
+                      const prevSub = subjects[subIdx - 1];
+                      const prevSubQs = allQs.map((q,gi)=>({...q,gi})).filter(q=>q.subject===prevSub);
+                      if (prevSubQs.length > 0) { setActiveSub(prevSub); setGlobalIdx(prevSubQs[prevSubQs.length-1].gi); }
+                    }
+                  }
+                }}
+                style={{ padding:"9px 20px", borderRadius:4, border:"2px solid #bbb", background:"white", fontWeight:700, fontSize:12, cursor:"pointer" }}>
+                ← BACK
+              </button>
+              <button onClick={() => setConfirm(true)}
+                style={{ padding:"9px 24px", borderRadius:4, border:"none", background:"#c62828", color:"white", fontWeight:800, fontSize:13, cursor:"pointer", letterSpacing:0.5 }}>
+                SUBMIT TEST
+              </button>
+              <button
+                onClick={() => {
+                  const curPosInSub = subQs.findIndex(q => q.gi === curGi);
+                  if (curPosInSub < subQs.length - 1) setGlobalIdx(subQs[curPosInSub + 1].gi);
+                  else {
+                    // Go to next subject first question
+                    const subIdx = subjects.indexOf(activeSub);
+                    if (subIdx < subjects.length - 1) {
+                      const nextSub = subjects[subIdx + 1];
+                      switchSubject(nextSub);
+                    }
+                  }
+                }}
+                style={{ padding:"9px 20px", borderRadius:4, border:"2px solid #bbb", background:"white", fontWeight:700, fontSize:12, cursor:"pointer" }}>
+                NEXT →
+              </button>
+            </div>
           </div>
         </div>
 
-        <div style={{ width:240, background:"white", borderLeft:"1px solid #eee", padding:16, overflowY:"auto", flexShrink:0 }}>
-          <div style={{ marginBottom:14 }}>
-            {[{s:Q_STATUS.NV,l:"Not Visited"},{s:Q_STATUS.NA,l:"Not Answered"},{s:Q_STATUS.ANS,l:"Answered"},{s:Q_STATUS.MR,l:"Marked"},{s:Q_STATUS.AMR,l:"Ans+Marked"}].map(({s,l})=>(
-              <div key={s} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5, fontSize:11 }}>
-                <div style={{ width:20,height:20,borderRadius:4,background:Q_COLORS[s],color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:9 }}>{counts[s]||0}</div>
-                <span style={{ color:"#555" }}>{l}</span>
-              </div>
-            ))}
+        {/* ── Right Sidebar — Question Palette ── */}
+        <div style={{ width:260, background:"white", borderLeft:"2px solid #e0e0e0", display:"flex", flexDirection:"column", flexShrink:0 }}>
+          {/* Student info */}
+          <div style={{ background:"#1a237e", color:"white", padding:"12px 14px", borderBottom:"2px solid #ffca28" }}>
+            <div style={{ fontWeight:700, fontSize:13 }}>👤 {student.name}</div>
+            <div style={{ fontSize:11, opacity:0.7, marginTop:2 }}>JEE Main — {test.title}</div>
           </div>
-          <div style={{ fontWeight:700, fontSize:12, color:"#1a237e", marginBottom:8 }}>Question Palette</div>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
-            {qs.map((_,i)=>(
-              <div key={i} onClick={()=>{ if(qStatus[i]===Q_STATUS.NV) setQS(i,Q_STATUS.NA); setIdx(i); }}
-                style={{ width:32,height:32,borderRadius:6,background:i===idx?"#1a237e":Q_COLORS[qStatus[i]],color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,cursor:"pointer",border:i===idx?"3px solid #ffca28":"none" }}>
-                {i+1}
-              </div>
-            ))}
+
+          {/* Legend */}
+          <div style={{ padding:"12px 14px", borderBottom:"1px solid #eee", background:"#fafafa" }}>
+            <div style={{ fontWeight:700, fontSize:11, color:"#555", marginBottom:8, textTransform:"uppercase", letterSpacing:0.5 }}>Legend</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"5px 10px" }}>
+              {[
+                { s:Q_STATUS.ANS, l:"Answered", c:"#27ae60" },
+                { s:Q_STATUS.NA,  l:"Not Answered", c:"#c0392b" },
+                { s:Q_STATUS.MR,  l:"Marked Review", c:"#8e44ad" },
+                { s:Q_STATUS.AMR, l:"Ans+Marked", c:"#8e44ad" },
+                { s:Q_STATUS.NV,  l:"Not Visited", c:"#808080" },
+              ].map(({ s, l, c }) => (
+                <div key={s} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11 }}>
+                  <div style={{ width:22, height:22, borderRadius:4, background:c, color:"white", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:10, flexShrink:0 }}>
+                    {counts[s] || 0}
+                  </div>
+                  <span style={{ color:"#444", lineHeight:1.2 }}>{l}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Palette — one section at a time */}
+          <div style={{ flex:1, overflowY:"auto", padding:"10px 14px" }}>
+            <div style={{ fontWeight:700, fontSize:11, color:"#1a237e", marginBottom:8, textTransform:"uppercase", letterSpacing:0.5 }}>
+              {activeSub} — Question Palette
+            </div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+              {subQs.map((q, localI) => {
+                const isActive = q.gi === curGi;
+                const st = qStatus[q.gi] || Q_STATUS.NV;
+                return (
+                  <div key={q.gi} onClick={() => setGlobalIdx(q.gi)}
+                    style={{ width:36, height:36, borderRadius: st === Q_STATUS.MR || st === Q_STATUS.AMR ? "50%" : 4,
+                      background: isActive ? "#1a237e" : Q_COLORS[st],
+                      color:"white", display:"flex", alignItems:"center", justifyContent:"center",
+                      fontSize:12, fontWeight:800, cursor:"pointer",
+                      border: isActive ? "3px solid #ffca28" : "none",
+                      boxShadow: isActive ? "0 0 0 2px #1a237e" : "none" }}>
+                    {localI + 1}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Submit button in sidebar */}
+          <div style={{ padding:"12px 14px", borderTop:"1px solid #eee" }}>
+            <button onClick={() => setConfirm(true)}
+              style={{ width:"100%", padding:"11px", borderRadius:4, border:"none", background:"#c62828", color:"white", fontWeight:800, fontSize:13, cursor:"pointer" }}>
+              SUBMIT TEST
+            </button>
           </div>
         </div>
       </div>
 
+      {/* Submit confirmation modal */}
       {confirm && (
-        <div style={{ position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999 }}>
-          <div style={{ background:"white",borderRadius:20,padding:36,maxWidth:400,width:"90%",textAlign:"center" }}>
-            <div style={{ fontSize:40,marginBottom:10 }}>⚠️</div>
-            <h2 style={{ margin:"0 0 8px",color:"#1a237e" }}>Submit Test?</h2>
-            <p style={{ color:"#666",margin:"0 0 20px" }}>Answered: {counts[Q_STATUS.ANS]||0} of {qs.length}. Cannot undo.</p>
-            <div style={{ display:"flex",gap:12,justifyContent:"center" }}>
-              <button onClick={()=>setConfirm(false)} style={{ padding:"12px 24px",borderRadius:10,border:"2px solid #ddd",background:"white",fontWeight:700,cursor:"pointer" }}>Cancel</button>
-              <button onClick={doSubmit} style={{ padding:"12px 24px",borderRadius:10,border:"none",background:"#e53935",color:"white",fontWeight:700,cursor:"pointer" }}>Yes, Submit</button>
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:999 }}>
+          <div style={{ background:"white", borderRadius:12, padding:36, maxWidth:420, width:"90%", textAlign:"center", boxShadow:"0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>⚠️</div>
+            <h2 style={{ margin:"0 0 8px", color:"#1a237e", fontSize:20 }}>Submit Test?</h2>
+            <p style={{ color:"#666", margin:"0 0 6px", fontSize:14 }}>Answered: <b style={{ color:"#27ae60" }}>{answeredCount}</b> of <b>{allQs.length}</b> questions.</p>
+            <p style={{ color:"#e53935", margin:"0 0 24px", fontSize:12 }}>This action cannot be undone.</p>
+            <div style={{ display:"flex", gap:12, justifyContent:"center" }}>
+              <button onClick={() => setConfirm(false)} style={{ padding:"12px 28px", borderRadius:6, border:"2px solid #bbb", background:"white", fontWeight:700, cursor:"pointer", fontSize:14 }}>Cancel</button>
+              <button onClick={doSubmit} style={{ padding:"12px 28px", borderRadius:6, border:"none", background:"#c62828", color:"white", fontWeight:800, cursor:"pointer", fontSize:14 }}>Yes, Submit</button>
             </div>
           </div>
         </div>
