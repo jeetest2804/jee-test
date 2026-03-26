@@ -149,26 +149,51 @@ async function callGeminiWithFallback(apiKey, models, base64, promptText, valida
 function buildSubjectPrompt(subject, startId) {
   return `You are extracting ONLY the ${subject} questions from this JEE exam PDF.
 
-Focus exclusively on ${subject} questions. Ignore Physics, Chemistry, and Mathematics questions that are NOT ${subject}.
-Question IDs should start from ${startId} and be sequential.
+Focus exclusively on ${subject} questions. Ignore other subjects.
+Question IDs start from ${startId} and must be sequential.
 
-This PDF may contain diagrams, graphs, figures, and mathematical expressions.
-For questions with diagrams/figures/graphs: include [FIGURE: detailed visual description] in the text.
+CRITICAL DIAGRAM RULES — read carefully:
+
+1. QUESTION DIAGRAMS: If the question itself has a figure/diagram, embed it in "text" using [FIGURE: description].
+   Example: "text": "Two blocks on a surface. [FIGURE: Two blocks A(3kg) and B(5kg) on horizontal surface. Force F1=50N pushes A from left. F2=18N pushes B from right. A and B are in contact.]"
+
+2. OPTION DIAGRAMS — THIS IS THE MOST IMPORTANT RULE:
+   When each option IS a graph or diagram (like "which graph shows the a-t relationship?"),
+   you MUST include a [FIGURE: description] tag INSIDE each option string.
+   NEVER put just "(A)", "(B)", "(C)", "(D)" as option text.
+   
+   WRONG: "options":["(A)","(B)","(C)","(D)"]
+   CORRECT: "options":[
+     "[FIGURE: a-t graph. Zero from t=0 to t0, then curves upward as parabola]",
+     "[FIGURE: a-t graph. Zero from t=0 to t0, then jumps up and increases linearly]",
+     "[FIGURE: a-t graph. Zero from t=0 to t0, then increases linearly from origin]",
+     "[FIGURE: a-t graph. Zero from t=0 to t0, then jumps to constant value]"
+   ]
+
+3. For graph descriptions be PRECISE about shape:
+   - "increases linearly" = straight diagonal line going up
+   - "parabola/concave up" = curved line bending upward  
+   - "constant" = horizontal flat line
+   - "jumps" = vertical step up
+   - "drops to zero" = vertical line going down to x-axis
+   Always mention: starting point, any flat/zero region, transitions, end behavior.
+   Always mention axis labels (a-t graph, v-t graph, F-t graph, etc.)
+
+4. For physics diagrams describe: object shapes, labels, forces with arrows and values, connections.
 
 Return ONLY valid JSON — no markdown, no explanation:
 {"questions":[
-{"id":${startId},"subject":"${subject}","type":"mcq","text":"full question text. [FIGURE: description if any diagram exists]","options":["A text","B text","C text","D text"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
+{"id":${startId},"subject":"${subject}","type":"mcq","text":"question text [FIGURE: desc if diagram in question]","options":["option A text or [FIGURE: desc]","option B or [FIGURE: desc]","option C or [FIGURE: desc]","option D or [FIGURE: desc]"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
 {"id":${startId+1},"subject":"${subject}","type":"integer","text":"full question text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
 ]}
 
 RULES:
 - subject: EXACTLY "${subject}"
 - type: "mcq" for 4-option, "integer" for numeric answer
-- options: 4 strings for MCQ with NO "A)" "B)" prefixes, empty [] for integer
+- options: 4 strings for MCQ — NEVER empty "(A)" labels, always real text or [FIGURE:...], empty [] for integer
 - correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual number for integer
 - marks: 4, negative: -1 for MCQ / 0 for integer
-- hasFigure: true if question has a diagram/graph/figure
-- [FIGURE: ...]: thorough description so student can understand without seeing original
+- hasFigure: true if question or any option has a diagram
 - Extract EVERY ${subject} question — do not skip any
 - Output ONLY the JSON object`;
 }
@@ -187,20 +212,26 @@ function buildFullPrompt() {
   return `You are extracting ALL questions from a JEE exam PDF. Extract EVERY question — do not stop early.
 A full JEE paper has 75-90 questions across Physics, Chemistry, Mathematics.
 
-This PDF may contain diagrams, graphs, figures.
-For questions with diagrams: include [FIGURE: detailed visual description] in the text.
+CRITICAL DIAGRAM RULES:
+1. QUESTION DIAGRAMS: embed in "text" as [FIGURE: detailed description of what the diagram shows]
+2. OPTION DIAGRAMS: When options ARE graphs/diagrams, put [FIGURE: description] INSIDE each option string.
+   WRONG: "options":["(A)","(B)","(C)","(D)"]
+   CORRECT: "options":["[FIGURE: a-t graph showing zero then parabola curve up]","[FIGURE: a-t graph showing zero then linear increase after jump]","[FIGURE: ...]","[FIGURE: ...]"]
+   For graph descriptions: state axis labels, starting value, shape (linear/parabola/constant/step), transitions.
+   NEVER use empty option labels when options contain graphs.
 
 Return ONLY valid JSON:
 {"questions":[
-{"id":1,"subject":"Physics","type":"mcq","text":"full text. [FIGURE: desc if diagram]","options":["A","B","C","D"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
+{"id":1,"subject":"Physics","type":"mcq","text":"full text [FIGURE: desc if diagram in question]","options":["option A or [FIGURE: desc]","option B or [FIGURE: desc]","option C or [FIGURE: desc]","option D or [FIGURE: desc]"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
 {"id":2,"subject":"Physics","type":"integer","text":"full text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
 ]}
 RULES:
 - subject: EXACTLY "Physics", "Chemistry", or "Mathematics"
 - type: "mcq" or "integer"
-- options: 4 strings for MCQ (no "A)" prefixes), [] for integer
+- options: 4 real strings for MCQ (never just "(A)"), [] for integer
 - correct: 0-based for MCQ, actual number for integer
 - Extract ALL questions. Output ONLY JSON.`;
+}
 }
 
 /* ══════════════════════════════════════════════════════════════════
