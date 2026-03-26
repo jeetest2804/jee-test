@@ -1034,16 +1034,62 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
    in the question object. This way images are always available.
 ───────────────────────────────────────────── */
 async function embedFigureImages(questions, pdfBase64, onProgress) {
-  // Build unique fetch jobs keyed by "page:top:bottom"
+  // ── STEP 1: For questions missing figureRegion, fetch the full page image
+  //            and ask Gemini to detect where the figure is.
+  const questionsNeedingDetection = questions.filter(
+    q => q.hasFigure && q.figurePageNumber && !q.figureRegion
+  );
+
+  if (questionsNeedingDetection.length > 0) {
+    // First render the full page (no crop) for each unique page needed
+    const pageCache = {}; // pageNumber → base64 PNG
+    const uniquePages = [...new Set(questionsNeedingDetection.map(q => q.figurePageNumber))];
+
+    await Promise.all(uniquePages.map(async page => {
+      try {
+        const res = await fetch("/api/page-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base64: pdfBase64, page, cropRegion: null }),
+        });
+        const data = await res.json();
+        if (data.ok && data.image) pageCache[page] = data.image;
+      } catch {}
+    }));
+
+    // Now ask Gemini to detect the figure region for each question
+    await Promise.all(questionsNeedingDetection.map(async q => {
+      const fullPageImage = pageCache[q.figurePageNumber];
+      if (!fullPageImage) return;
+      try {
+        const hint = q.text ? q.text.replace(/\[FIGURE[^\]]*\]/g, "").trim().slice(0, 120) : "";
+        const res = await fetch("/api/detect-figure-region", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pageImageBase64: fullPageImage, questionHint: hint }),
+        });
+        const data = await res.json();
+        if (data.ok && data.region) {
+          q.figureRegion = data.region; // mutate in place before building jobMap
+        }
+        // If region is null, leave figureRegion unset — Step 2 will use center-strip fallback
+      } catch {}
+    }));
+  }
+
+  // ── STEP 2: Build unique fetch jobs keyed by "page:top:bottom".
+  //   For any question still missing figureRegion after detection, use a
+  //   center-strip fallback (top 15%–85%) instead of the full page.
+  const CENTER_STRIP = { top: 15, bottom: 85, left: 0, right: 100 };
   const jobMap = {}; // key → { page, cropRegion }
   questions.forEach(q => {
     if (!q.hasFigure || !q.figurePageNumber) return;
-    const r = q.figureRegion;
-    const key = r ? `${q.figurePageNumber}:${r.top}:${r.bottom}` : `${q.figurePageNumber}`;
-    if (!jobMap[key]) jobMap[key] = { page: q.figurePageNumber, cropRegion: r || null };
+    const r = q.figureRegion || CENTER_STRIP;
+    const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
+    if (!jobMap[key]) jobMap[key] = { page: q.figurePageNumber, cropRegion: r };
   });
 
-  const jobs = Object.entries(jobMap); // [[key, {page, cropRegion}], ...]
+  const jobs = Object.entries(jobMap);
   if (jobs.length === 0) return questions;
 
   const imageCache = {}; // key → base64 image
@@ -1066,11 +1112,11 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
     }));
   }
 
-  // Embed the correct cropped image into each question
+  // ── STEP 3: Embed the correct cropped image into each question
   return questions.map(q => {
     if (!q.hasFigure || !q.figurePageNumber) return q;
-    const r = q.figureRegion;
-    const key = r ? `${q.figurePageNumber}:${r.top}:${r.bottom}` : `${q.figurePageNumber}`;
+    const r = q.figureRegion || CENTER_STRIP;
+    const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
     if (imageCache[key]) return { ...q, figureImageData: imageCache[key] };
     return q;
   });
