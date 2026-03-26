@@ -866,7 +866,7 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const MODELS = [
     { id: "gemini-2.0-flash",      label: "Gemini 2.0 Flash",      limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best overall — fast, reliable, great for PDFs" },
     { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite",  limit: "1500 req/day", badge: "🚀 Fastest",      badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Fastest response, use if quota is tight" },
-    { id: "gemini-2.5-pro-preview-03-25", label: "Gemini 2.5 Pro", limit: "50 req/day", badge: "🧠 Smartest", badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Most accurate extraction, lower daily quota" },
+    { id: "gemini-2.5-pro-exp-03-25", label: "Gemini 2.5 Pro", limit: "50 req/day", badge: "🧠 Smartest", badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Most accurate extraction, lower daily quota" },
   ];
 
   return (
