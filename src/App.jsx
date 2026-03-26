@@ -133,6 +133,86 @@ function renderMath(text) {
 }
 
 /* ─────────────────────────────────────────────
+   FIGURE / DIAGRAM RENDERER
+   Parses [FIGURE: description] tags from question text
+   and renders them as styled diagram boxes
+───────────────────────────────────────────── */
+function renderQuestionText(text) {
+  if (!text) return null;
+  // Split text by [FIGURE: ...] tags
+  const parts = text.split(/(\[FIGURE:[^\]]+\])/gi);
+  return parts.map((part, i) => {
+    const figMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
+    if (figMatch) {
+      const desc = figMatch[1].trim();
+      return (
+        <div key={i} style={{
+          margin: "16px 0",
+          border: "2px solid #1a237e",
+          borderRadius: 8,
+          overflow: "hidden",
+          background: "#f8f9ff",
+        }}>
+          {/* Figure header */}
+          <div style={{
+            background: "#1a237e",
+            color: "white",
+            padding: "6px 14px",
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: 0.5,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}>
+            <span>📊</span> FIGURE / DIAGRAM
+          </div>
+          {/* Figure description box */}
+          <div style={{
+            padding: "16px 20px",
+            background: "white",
+            minHeight: 80,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}>
+            {/* Visual representation hint */}
+            <div style={{
+              background: "#e8eaf6",
+              borderRadius: 6,
+              padding: "10px 14px",
+              border: "1px dashed #5c6bc0",
+              textAlign: "center",
+              color: "#5c6bc0",
+              fontSize: 12,
+              fontWeight: 600,
+            }}>
+              📐 [Diagram extracted from PDF]
+            </div>
+            {/* Description */}
+            <div style={{
+              fontSize: 13,
+              color: "#333",
+              lineHeight: 1.7,
+              fontFamily: "Georgia, serif",
+              fontStyle: "italic",
+              borderLeft: "3px solid #1a237e",
+              paddingLeft: 12,
+            }}>
+              {renderMath(desc)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    // Regular text — apply math rendering
+    const mathRendered = renderMath(part);
+    if (!mathRendered) return null;
+    return <span key={i}>{mathRendered}</span>;
+  });
+}
+
+/* ─────────────────────────────────────────────
    DEMO QUESTIONS
 ───────────────────────────────────────────── */
 const DEMO_QUESTIONS = [
@@ -560,7 +640,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
         if (paperFile) {
           setMsg("📄 Converting PDF to base64...", "info");
           const b64 = await toBase64(paperFile);
-          setMsg("🤖 Sending to Gemini AI to extract questions... (may take up to 60s for large PDFs)", "info");
+          setMsg("🤖 Extracting questions in parallel (Physics + Chemistry + Maths simultaneously)... Please wait up to 90s", "info");
           try {
             const res = await parsePDF(b64, false, savedModel);
             if (res?.questions?.length) {
@@ -581,7 +661,8 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
                 };
               });
               geminiUsed = true;
-              setMsg(`✅ Gemini extracted ${questions.length} questions!`, "success");
+              const warnMsg = res.warning ? ` ⚠️ Warning: ${res.warning}` : "";
+              setMsg(`✅ Extracted ${questions.length} questions across all subjects!${warnMsg}`, questions.length > 0 ? "success" : "warning");
             } else {
               setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs for details.", "error");
               setLoading(false);
@@ -619,7 +700,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
         }
         setMsg("📁 Fetching from Google Drive...", "info");
         const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
-        setMsg("🤖 Sending to Gemini AI... (may take up to 60s for large PDFs)", "info");
+        setMsg("🤖 Extracting questions in parallel (Physics + Chemistry + Maths)... Please wait up to 90s", "info");
         try {
           const parsed = await parsePDF(paperB64, false, savedModel);
           if (parsed?.questions?.length) {
@@ -1627,9 +1708,9 @@ function TestScreen({ test, student, onSubmit }) {
           {/* Question body */}
           <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
             <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
-              <p style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
-                {renderMath(cur.text)}
-              </p>
+              <div style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
+                {renderQuestionText(cur.text)}
+              </div>
             </div>
 
             {cur.type === "mcq" ? (
@@ -1650,7 +1731,7 @@ function TestScreen({ test, student, onSubmit }) {
                         {["A","B","C","D"][oi]}
                       </div>
                       <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                        {renderMath(opt)}
+                        {renderQuestionText(opt)}
                       </span>
                     </div>
                   );
@@ -1968,13 +2049,13 @@ function ResultsScreen({ test, student, submission, onBack }) {
               </div>
               {expanded===i && (
                 <div style={{ padding:"0 18px 18px", borderTop:`1px solid ${border}` }}>
-                  <p style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75, whiteSpace:"pre-wrap" }}>{renderMath(r.text)}</p>
+                  <div style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{renderQuestionText(r.text)}</div>
                   {r.type==="mcq" ? r.options.map((opt,oi)=>(
                     <div key={oi} style={{ padding:"8px 12px", borderRadius:8, marginBottom:6, fontSize:13,
                       background:String(r.correct)===String(oi)?"#c8e6c9":String(r.given)===String(oi)?"#ffcdd2":"white",
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
-                      {["A","B","C","D"][oi]}) {renderMath(opt)}
+                      {["A","B","C","D"][oi]}) {renderQuestionText(opt)}
                       {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
                       {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
