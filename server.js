@@ -13,6 +13,14 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
+// Increase timeout for large PDF processing (Gemini can take 60-90s on big papers)
+app.use((req, res, next) => {
+  res.setTimeout(180_000, () => {
+    res.status(503).json({ error: "Server timeout — PDF may be too large. Try a smaller file." });
+  });
+  next();
+});
+
 /* ── Serve built frontend ── */
 const distPath = join(__dirname, "dist");
 app.use(express.static(distPath));
