@@ -232,7 +232,6 @@ RULES:
 - correct: 0-based for MCQ, actual number for integer
 - Extract ALL questions. Output ONLY JSON.`;
 }
-}
 
 /* ══════════════════════════════════════════════════════════════════
    /api/parse-pdf  — main endpoint
