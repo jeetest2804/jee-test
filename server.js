@@ -204,6 +204,7 @@ app.get("*", (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+// Must bind to 0.0.0.0 explicitly — Render scans all interfaces for the open port
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ TestForge server running on port ${PORT}`);
 });
