@@ -1034,38 +1034,44 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
    in the question object. This way images are always available.
 ───────────────────────────────────────────── */
 async function embedFigureImages(questions, pdfBase64, onProgress) {
-  // Collect unique page numbers needed
-  const pages = [...new Set(
-    questions.filter(q => q.hasFigure && q.figurePageNumber).map(q => q.figurePageNumber)
-  )];
-  if (pages.length === 0) return questions;
+  // Build unique fetch jobs keyed by "page:top:bottom"
+  const jobMap = {}; // key → { page, cropRegion }
+  questions.forEach(q => {
+    if (!q.hasFigure || !q.figurePageNumber) return;
+    const r = q.figureRegion;
+    const key = r ? `${q.figurePageNumber}:${r.top}:${r.bottom}` : `${q.figurePageNumber}`;
+    if (!jobMap[key]) jobMap[key] = { page: q.figurePageNumber, cropRegion: r || null };
+  });
 
-  const pageImages = {};
+  const jobs = Object.entries(jobMap); // [[key, {page, cropRegion}], ...]
+  if (jobs.length === 0) return questions;
+
+  const imageCache = {}; // key → base64 image
   let done = 0;
-  // Fetch all pages in parallel (max 5 at a time to avoid overload)
   const BATCH = 5;
-  for (let i = 0; i < pages.length; i += BATCH) {
-    const batch = pages.slice(i, i + BATCH);
-    await Promise.all(batch.map(async (page) => {
+  for (let i = 0; i < jobs.length; i += BATCH) {
+    const batch = jobs.slice(i, i + BATCH);
+    await Promise.all(batch.map(async ([key, { page, cropRegion }]) => {
       try {
         const res = await fetch("/api/page-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ base64: pdfBase64, page }),
+          body: JSON.stringify({ base64: pdfBase64, page, cropRegion }),
         });
         const data = await res.json();
-        if (data.ok && data.image) pageImages[page] = data.image;
+        if (data.ok && data.image) imageCache[key] = data.image;
       } catch {}
       done++;
-      if (onProgress) onProgress(done, pages.length);
+      if (onProgress) onProgress(done, jobs.length);
     }));
   }
 
-  // Embed image data into each question
+  // Embed the correct cropped image into each question
   return questions.map(q => {
-    if (q.hasFigure && q.figurePageNumber && pageImages[q.figurePageNumber]) {
-      return { ...q, figureImageData: pageImages[q.figurePageNumber] };
-    }
+    if (!q.hasFigure || !q.figurePageNumber) return q;
+    const r = q.figureRegion;
+    const key = r ? `${q.figurePageNumber}:${r.top}:${r.bottom}` : `${q.figurePageNumber}`;
+    if (imageCache[key]) return { ...q, figureImageData: imageCache[key] };
     return q;
   });
 }
