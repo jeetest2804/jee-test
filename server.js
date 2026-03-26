@@ -70,13 +70,13 @@ Rules:
   const ALL_MODELS = [
     "gemini-2.0-flash",                // FREE — 1500 req/day — most reliable
     "gemini-2.0-flash-lite",           // FREE — 1500 req/day — faster/lighter
-    "gemini-2.5-pro-preview-03-25",    // FREE tier — 50 req/day — most accurate
+    "gemini-2.5-pro-exp-03-25",    // FREE tier — 50 req/day — most accurate
   ];
   // If client sends a deprecated model (e.g. saved in their browser from old version), remap it
   const DEPRECATED_REMAP = {
     "gemini-1.5-flash":    "gemini-2.0-flash",
     "gemini-1.5-flash-8b": "gemini-2.0-flash-lite",
-    "gemini-1.5-pro":      "gemini-2.5-pro-preview-03-25",
+    "gemini-1.5-pro":      "gemini-2.5-pro-exp-03-25",
   };
   const remapped = requestedModel && DEPRECATED_REMAP[requestedModel]
     ? DEPRECATED_REMAP[requestedModel]
