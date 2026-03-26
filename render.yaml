@@ -5,7 +5,7 @@ services:
     buildCommand: npm run render-build
     startCommand: npm start
     envVars:
-      - key: GEMINI_API_KEY
-        sync: false   # You set this manually in Render dashboard
+      - key: OPENROUTER_API_KEY
+        sync: false   # Set this manually in Render dashboard
       - key: NODE_ENV
         value: production

@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { readFileSync, existsSync } from "fs";
+import { existsSync } from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// Increase timeout for large PDF processing (Gemini can take 60-90s on big papers)
+// Generous timeout for large PDF processing
 app.use((req, res, next) => {
   res.setTimeout(180_000, () => {
     res.status(503).json({ error: "Server timeout — PDF may be too large. Try a smaller file." });
@@ -25,16 +25,17 @@ app.use((req, res, next) => {
 const distPath = join(__dirname, "dist");
 app.use(express.static(distPath));
 
-/* ══════════════════════════════════════════
-   /api/parse-pdf  — Gemini AI PDF parsing
-══════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   /api/parse-pdf  — OpenRouter AI PDF parsing
+   Uses FREE models + FREE pdf-text engine
+   50 requests/day free — more than enough for 7/month
+══════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
-  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
 
-  if (!geminiApiKey) {
+  if (!openRouterKey) {
     return res.status(500).json({
-      error:
-        "GEMINI_API_KEY is not set. Add it in Render → Environment → Environment Variables.",
+      error: "OPENROUTER_API_KEY is not set. Add it in Render → Environment → Environment Variables.",
     });
   }
 
@@ -63,122 +64,127 @@ Rules:
 - Extract EVERY question in the PDF, do not skip any
 - Output pure JSON only, no explanation`;
 
-  try {
-    // Try models in order: flash is faster/cheaper, pro is more capable
-    const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"];
-    let lastError = null;
+  // Free models on OpenRouter — tried in order
+  const models = [
+    "google/gemini-2.0-flash-lite",
+    "google/gemini-2.5-flash",
+    "google/gemma-3-27b-it",
+  ];
 
-    for (const model of models) {
-      try {
-        console.log(`[Gemini] Trying model: ${model}, isKey=${isKey}, base64 length=${base64.length}`);
+  let lastError = null;
 
-        const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [
+  for (const model of models) {
+    try {
+      console.log(`[OpenRouter] Trying model: ${model}, isKey=${isKey}`);
+
+      const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${openRouterKey}`,
+          "Content-Type": "application/json",
+          "X-Title": "JEE TestForge",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "user",
+              content: [
                 {
-                  parts: [
-                    {
-                      inline_data: {
-                        mime_type: "application/pdf",
-                        data: base64,
-                      },
-                    },
-                    { text: prompt },
-                  ],
+                  type: "file",
+                  file: {
+                    filename: "exam.pdf",
+                    file_data: `data:application/pdf;base64,${base64}`,
+                  },
+                },
+                {
+                  type: "text",
+                  text: prompt,
                 },
               ],
-              generationConfig: {
-                temperature: 0.1,
-                maxOutputTokens: 8192,
-                // NOTE: Do NOT set responseMimeType here — it changes the
-                // response structure and breaks text extraction.
-              },
-            }),
-          }
-        );
+            },
+          ],
+          plugins: [
+            {
+              id: "file-parser",
+              pdf: { engine: "pdf-text" },
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 8192,
+        }),
+      });
 
-        if (!geminiRes.ok) {
-          const errBody = await geminiRes.text();
-          lastError = `Gemini ${model} HTTP ${geminiRes.status}: ${errBody}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-
-        const data = await geminiRes.json();
-        console.log(`[Gemini] Raw response keys:`, Object.keys(data));
-
-        // Extract the text content
-        let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        console.log(`[Gemini] Raw text (first 300 chars):`, txt.slice(0, 300));
-
-        if (!txt) {
-          // Check for safety blocks or empty candidates
-          const finishReason = data.candidates?.[0]?.finishReason;
-          lastError = `Gemini ${model} returned empty text. finishReason=${finishReason}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-
-        // Strip markdown code fences if present
-        txt = txt
-          .replace(/^```json\s*/i, "")
-          .replace(/^```\s*/i, "")
-          .replace(/\s*```$/i, "")
-          .trim();
-
-        // Find the outermost JSON object
-        const start = txt.indexOf("{");
-        const end = txt.lastIndexOf("}");
-        if (start === -1 || end === -1) {
-          lastError = `Gemini ${model}: No JSON object found. Raw: ${txt.slice(0, 300)}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-
-        const jsonStr = txt.slice(start, end + 1);
-        let parsed;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch (parseErr) {
-          lastError = `Gemini ${model}: JSON parse failed — ${parseErr.message}. Raw: ${jsonStr.slice(0, 300)}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-
-        // Validate the parsed result has expected shape
-        if (!isKey && (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0)) {
-          lastError = `Gemini ${model}: questions array is empty or missing. Got keys: ${Object.keys(parsed)}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-        if (isKey && (!parsed.answers || !Array.isArray(parsed.answers) || parsed.answers.length === 0)) {
-          lastError = `Gemini ${model}: answers array is empty or missing. Got keys: ${Object.keys(parsed)}`;
-          console.error(`[Gemini] ${lastError}`);
-          continue;
-        }
-
-        console.log(`[Gemini] ✅ Success with ${model}! Items: ${isKey ? parsed.answers?.length : parsed.questions?.length}`);
-        return res.status(200).json({ ok: true, data: parsed });
-
-      } catch (fetchErr) {
-        lastError = `Fetch error for ${model}: ${fetchErr.message}`;
-        console.error(`[Gemini] ${lastError}`);
+      if (!orRes.ok) {
+        const errBody = await orRes.text();
+        lastError = `OpenRouter ${model} HTTP ${orRes.status}: ${errBody}`;
+        console.error(`[OpenRouter] ${lastError}`);
         continue;
       }
+
+      const data = await orRes.json();
+      console.log(`[OpenRouter] finish_reason: ${data.choices?.[0]?.finish_reason}`);
+
+      let txt = data.choices?.[0]?.message?.content || "";
+      console.log(`[OpenRouter] Raw text (first 300 chars):`, txt.slice(0, 300));
+
+      if (!txt) {
+        lastError = `OpenRouter ${model} returned empty text`;
+        console.error(`[OpenRouter] ${lastError}`);
+        continue;
+      }
+
+      // Strip markdown code fences
+      txt = txt
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+
+      // Find outermost JSON object
+      const start = txt.indexOf("{");
+      const end = txt.lastIndexOf("}");
+      if (start === -1 || end === -1) {
+        lastError = `OpenRouter ${model}: No JSON found. Raw: ${txt.slice(0, 300)}`;
+        console.error(`[OpenRouter] ${lastError}`);
+        continue;
+      }
+
+      const jsonStr = txt.slice(start, end + 1);
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch (parseErr) {
+        lastError = `OpenRouter ${model}: JSON parse failed — ${parseErr.message}. Raw: ${jsonStr.slice(0, 300)}`;
+        console.error(`[OpenRouter] ${lastError}`);
+        continue;
+      }
+
+      // Validate shape
+      if (!isKey && (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0)) {
+        lastError = `OpenRouter ${model}: questions array empty/missing. Keys: ${Object.keys(parsed)}`;
+        console.error(`[OpenRouter] ${lastError}`);
+        continue;
+      }
+      if (isKey && (!parsed.answers || !Array.isArray(parsed.answers) || parsed.answers.length === 0)) {
+        lastError = `OpenRouter ${model}: answers array empty/missing. Keys: ${Object.keys(parsed)}`;
+        console.error(`[OpenRouter] ${lastError}`);
+        continue;
+      }
+
+      const count = isKey ? parsed.answers.length : parsed.questions.length;
+      console.log(`[OpenRouter] ✅ Success with ${model}! Items extracted: ${count}`);
+      return res.status(200).json({ ok: true, data: parsed });
+
+    } catch (fetchErr) {
+      lastError = `Fetch error for ${model}: ${fetchErr.message}`;
+      console.error(`[OpenRouter] ${lastError}`);
+      continue;
     }
-
-    // All models failed
-    console.error("[Gemini] All models failed. Last error:", lastError);
-    return res.status(502).json({ error: lastError || "All Gemini models failed" });
-
-  } catch (err) {
-    console.error("[Gemini] Unexpected server error:", err);
-    return res.status(500).json({ error: "Server error: " + err.message });
   }
+
+  console.error("[OpenRouter] All models failed. Last error:", lastError);
+  return res.status(502).json({ error: lastError || "All models failed. Check Render logs." });
 });
 
 /* ── Catch-all: serve React app (SPA routing) ── */
