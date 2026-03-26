@@ -134,11 +134,97 @@ function renderMath(text) {
 
 /* ─────────────────────────────────────────────
    FIGURE / DIAGRAM RENDERER
-   Converts [FIGURE: description] → actual SVG diagrams
+   Shows actual PDF page images instead of re-drawn SVGs.
+   Falls back to SVG only for legacy [FIGURE: description] format.
 ───────────────────────────────────────────── */
 
 /* ══════════════════════════════════════════
-   GRAPH SVG — for a-t, v-t, F-t style graphs
+   REAL PAGE IMAGE — fetches actual PDF page
+   pdfBase64 is stored in window.__pdfBase64 after upload
+══════════════════════════════════════════ */
+function PageImageFigure({ pageNumber, compact, label }) {
+  const [imgSrc, setImgSrc] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!pageNumber) { setLoading(false); setError(true); return; }
+    const pdfBase64 = window.__pdfBase64;
+    if (!pdfBase64) { setLoading(false); setError(true); return; }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(false);
+
+    fetch("/api/page-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base64: pdfBase64, page: pageNumber }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (cancelled) return;
+        if (data.ok && data.image) setImgSrc(`data:image/png;base64,${data.image}`);
+        else setError(true);
+        setLoading(false);
+      })
+      .catch(() => { if (!cancelled) { setError(true); setLoading(false); } });
+
+    return () => { cancelled = true; };
+  }, [pageNumber]);
+
+  const w = compact ? 260 : 380;
+  const containerStyle = {
+    border: "1.5px solid #1a237e",
+    borderRadius: compact ? 6 : 8,
+    overflow: "hidden",
+    background: "white",
+    display: "inline-block",
+    maxWidth: "100%",
+    verticalAlign: "top",
+  };
+  const headerStyle = {
+    background: "#1a237e",
+    color: "white",
+    padding: compact ? "3px 8px" : "5px 12px",
+    fontSize: compact ? 9 : 11,
+    fontWeight: 700,
+    letterSpacing: 0.4,
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+  };
+
+  return (
+    <div style={containerStyle}>
+      <div style={headerStyle}>
+        <span>🖼️</span> {label || "FIGURE"} {pageNumber ? `(p.${pageNumber})` : ""}
+      </div>
+      <div style={{ padding: compact ? "4px 6px" : "8px 12px", textAlign: "center", minHeight: 60, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {loading && (
+          <div style={{ color: "#666", fontSize: compact ? 10 : 12 }}>
+            <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⏳</span> Loading diagram...
+          </div>
+        )}
+        {!loading && error && (
+          <div style={{ color: "#999", fontSize: compact ? 9 : 11, fontStyle: "italic" }}>
+            [Figure on page {pageNumber}]
+          </div>
+        )}
+        {!loading && imgSrc && (
+          <img
+            src={imgSrc}
+            alt={`Figure from page ${pageNumber}`}
+            style={{ maxWidth: w, width: "100%", height: "auto", display: "block" }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════
+   GRAPH SVG — legacy fallback for old [FIGURE: description] format
 ══════════════════════════════════════════ */
 function GraphSVG({ desc, compact }) {
   const d = desc.toLowerCase();
@@ -549,13 +635,25 @@ function FigureBox({ desc, compact }) {
   );
 }
 
-function renderQuestionText(text, compact) {
+// New: render question text supporting both [FIGURE] (new) and [FIGURE: desc] (legacy)
+function renderQuestionText(text, compact, figurePageNumber) {
   if (!text) return null;
-  const parts = text.split(/(\[FIGURE:[^\]]+\])/gi);
+  // Split on both new [FIGURE] / [FIGURE_X] and legacy [FIGURE: description]
+  const parts = text.split(/(\[FIGURE(?:_[ABCD])?\]|\[FIGURE:[^\]]+\])/gi);
   return parts.map((part, i) => {
-    const figMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
-    if (figMatch) {
-      const desc = figMatch[1].trim();
+    // New format: [FIGURE] — show real PDF page image
+    if (/^\[FIGURE\]$/i.test(part)) {
+      return <PageImageFigure key={i} pageNumber={figurePageNumber} compact={compact} label="FIGURE" />;
+    }
+    // New format: [FIGURE_A] etc (option is a diagram — show inline)
+    const optMatch = part.match(/^\[FIGURE_([ABCD])\]$/i);
+    if (optMatch) {
+      return <PageImageFigure key={i} pageNumber={figurePageNumber} compact={compact} label={`Graph ${optMatch[1]}`} />;
+    }
+    // Legacy format: [FIGURE: description] — use old SVG renderer as fallback
+    const legacyMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
+    if (legacyMatch) {
+      const desc = legacyMatch[1].trim();
       return <FigureBox key={i} desc={desc} compact={compact} />;
     }
     const mathRendered = renderMath(part);
@@ -1035,6 +1133,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
             setMsg(`📄 Extracting ${sec.subject} questions... (${enabledSections.indexOf(sec)+1}/${enabledSections.length})`, "info");
             try {
               const b64 = await toBase64(sec.file);
+              window.__pdfBase64 = b64; // Store for diagram image fetching
               const res = await parsePDF(b64, false, savedModel);
               if (res?.questions?.length) {
                 const normalized = normalizeQs(res.questions).map(q => ({
@@ -1064,6 +1163,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
         } else if (paperFile) {
           setMsg("📄 Converting PDF to base64...", "info");
           const b64 = await toBase64(paperFile);
+          window.__pdfBase64 = b64; // Store for diagram image fetching
           setMsg("🤖 Extracting all subjects in parallel... Please wait up to 90s", "info");
           try {
             const res = await parsePDF(b64, false, savedModel);
@@ -1107,6 +1207,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
         }
         setMsg("📁 Fetching from Google Drive...", "info");
         const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
+        window.__pdfBase64 = paperB64; // Store for diagram image fetching
         setMsg("🤖 Extracting questions in parallel (Physics + Chemistry + Maths)... Please wait up to 90s", "info");
         try {
           const parsed = await parsePDF(paperB64, false, savedModel);
@@ -2402,7 +2503,7 @@ function TestScreen({ test, student, onSubmit }) {
           <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
             <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
               <div style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
-                {renderQuestionText(cur.text)}
+                {renderQuestionText(cur.text, false, cur.figurePageNumber)}
               </div>
             </div>
 
@@ -2424,7 +2525,7 @@ function TestScreen({ test, student, onSubmit }) {
                         {["A","B","C","D"][oi]}
                       </div>
                       <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                        {renderQuestionText(opt, true)}
+                        {renderQuestionText(opt, true, cur.figurePageNumber)}
                       </span>
                     </div>
                   );
@@ -2742,13 +2843,13 @@ function ResultsScreen({ test, student, submission, onBack }) {
               </div>
               {expanded===i && (
                 <div style={{ padding:"0 18px 18px", borderTop:`1px solid ${border}` }}>
-                  <div style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{renderQuestionText(r.text)}</div>
+                  <div style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{renderQuestionText(r.text, false, r.figurePageNumber)}</div>
                   {r.type==="mcq" ? r.options.map((opt,oi)=>(
                     <div key={oi} style={{ padding:"8px 12px", borderRadius:8, marginBottom:6, fontSize:13,
                       background:String(r.correct)===String(oi)?"#c8e6c9":String(r.given)===String(oi)?"#ffcdd2":"white",
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
-                      {["A","B","C","D"][oi]}) {renderQuestionText(opt, true)}
+                      {["A","B","C","D"][oi]}) {renderQuestionText(opt, true, r.figurePageNumber)}
                       {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
                       {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
