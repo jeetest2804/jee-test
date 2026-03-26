@@ -79,16 +79,34 @@ const DEMO_QUESTIONS = [
    The Gemini API key never touches the browser.
 ───────────────────────────────────────────── */
 async function parsePDF(base64, isKey) {
-  const res = await fetch("/api/parse-pdf", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base64, isKey }),
-  });
+  // 120 second timeout — large JEE PDFs can take a while
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
 
-  const json = await res.json();
+  let res;
+  try {
+    res = await fetch("/api/parse-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base64, isKey }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") throw new Error("Request timed out after 120s. Try a smaller PDF.");
+    throw new Error("Network error — is the server running? " + err.message);
+  }
+  clearTimeout(timer);
+
+  let json;
+  try {
+    json = await res.json();
+  } catch {
+    throw new Error(`Server returned non-JSON response (status ${res.status}). Check Render logs.`);
+  }
 
   if (!res.ok) {
-    // Surface the server's error message to the caller
+    // Surface the full server error message
     throw new Error(json.error || `Server error ${res.status}`);
   }
 
@@ -418,12 +436,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const createTest = async () => {
     if (!form.title.trim()) { setMsg("Enter a test title", "error"); return; }
 
-    // Guard: if uploading PDFs, warn user that Gemini is server-side
-    // (no key needed from UI — it's in Vercel env)
     setLoading(true);
     setMsg("Starting...", "info");
 
-    let questions = null; // null means "not yet determined"
+    let questions = null;
     let geminiUsed = false;
 
     try {
@@ -431,7 +447,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         if (paperFile) {
           setMsg("📄 Converting PDF to base64...", "info");
           const b64 = await toBase64(paperFile);
-          setMsg("🤖 Sending to Gemini AI to extract questions...", "info");
+          setMsg("🤖 Sending to Gemini AI to extract questions... (may take up to 60s for large PDFs)", "info");
           try {
             const res = await parsePDF(b64, false);
             if (res?.questions?.length) {
@@ -439,12 +455,14 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               geminiUsed = true;
               setMsg(`✅ Gemini extracted ${questions.length} questions!`, "success");
             } else {
-              setMsg("⚠️ Gemini returned no questions. Falling back to demo questions.", "warning");
-              questions = DEMO_QUESTIONS;
+              setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs for details.", "error");
+              setLoading(false);
+              return;
             }
           } catch (geminiErr) {
-            setMsg(`❌ Gemini error: ${geminiErr.message}. Falling back to demo questions.`, "error");
-            questions = DEMO_QUESTIONS;
+            setMsg(`❌ Gemini failed: ${geminiErr.message}`, "error");
+            setLoading(false);
+            return;
           }
         } else {
           questions = DEMO_QUESTIONS;
@@ -462,7 +480,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
               setMsg(`✅ Answer key applied to ${Object.keys(map).length} questions.`, "success");
             }
           } catch (keyErr) {
-            setMsg(`⚠️ Answer key parse failed: ${keyErr.message}. Using extracted answers.`, "warning");
+            setMsg(`⚠️ Answer key parse failed: ${keyErr.message}. Using answers extracted from paper.`, "warning");
           }
         }
       } else if (form.mode === "drive") {
@@ -473,19 +491,21 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         }
         setMsg("📁 Fetching from Google Drive...", "info");
         const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
-        setMsg("🤖 Sending to Gemini AI...", "info");
+        setMsg("🤖 Sending to Gemini AI... (may take up to 60s for large PDFs)", "info");
         try {
           const parsed = await parsePDF(paperB64, false);
           if (parsed?.questions?.length) {
             questions = parsed.questions;
             geminiUsed = true;
           } else {
-            questions = DEMO_QUESTIONS;
-            setMsg("⚠️ Gemini returned no questions. Using demo questions.", "warning");
+            setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs.", "error");
+            setLoading(false);
+            return;
           }
         } catch (err) {
-          setMsg(`❌ Gemini error: ${err.message}. Using demo questions.`, "error");
-          questions = DEMO_QUESTIONS;
+          setMsg(`❌ Gemini failed: ${err.message}`, "error");
+          setLoading(false);
+          return;
         }
         if (form.driveKeyFileId && geminiUsed) {
           try {
@@ -502,8 +522,9 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         questions = DEMO_QUESTIONS;
       }
     } catch (e) {
-      setMsg("Unexpected error: " + e.message + " — using demo questions.", "error");
-      questions = DEMO_QUESTIONS;
+      setMsg("Unexpected error: " + e.message, "error");
+      setLoading(false);
+      return;
     }
 
     const test = {
@@ -741,7 +762,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
                 <div>
                   <div style={{ fontWeight:700, color:"#2e7d32", fontSize:14 }}>Gemini AI is ready</div>
                   <div style={{ fontSize:12, color:"#555", marginTop:3 }}>
-                    Questions will be extracted automatically using the Gemini API key configured on your server (Vercel environment variable). You don't need to enter anything here.
+                    Questions will be extracted automatically using the Gemini API key configured on your server (Render environment variable). You don't need to enter anything here.
                   </div>
                 </div>
               </div>
@@ -817,7 +838,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 
 /* ─────────────────────────────────────────────
    SETTINGS VIEW  — only Drive key here now
-   Gemini key is server-side (Vercel env var)
+   Gemini key is server-side (Render env var)
 ───────────────────────────────────────────── */
 function SettingsView({ savedDriveKey, onSave }) {
   const [drive, setDrive] = useState(savedDriveKey || "");
@@ -838,7 +859,7 @@ function SettingsView({ savedDriveKey, onSave }) {
     <div style={{ maxWidth:620 }}>
       <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>⚙️ Settings</h2>
       <p style={{ color:"#888", fontSize:13, margin:"0 0 28px" }}>
-        The Gemini API key is configured securely on the server (Vercel environment variable) and is never exposed to the browser. Only the Google Drive API key is stored here.
+        The Gemini API key is configured securely on the server (Render environment variable) and is never exposed to the browser. Only the Google Drive API key is stored here.
       </p>
 
       {/* Gemini info card */}
@@ -847,12 +868,12 @@ function SettingsView({ savedDriveKey, onSave }) {
           <span style={{ fontSize:22 }}>🤖</span>
           <div>
             <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini API Key</div>
-            <div style={{ fontSize:12, color:"#888" }}>Stored securely as a Vercel environment variable</div>
+            <div style={{ fontSize:12, color:"#888" }}>Stored securely as a Render environment variable</div>
           </div>
           <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>🔒 Server-side</span>
         </div>
         <div style={{ marginTop:12, background:"#f8f9ff", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#555" }}>
-          To change the key: go to <b>Vercel → Your Project → Settings → Environment Variables</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>GEMINI_API_KEY</code> → Redeploy.
+          To change the key: go to <b>Render → Your Service → Environment → Environment Variables</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>GEMINI_API_KEY</code> → Redeploy.
         </div>
       </div>
 
