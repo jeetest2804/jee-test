@@ -564,7 +564,22 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
           try {
             const res = await parsePDF(b64, false, savedModel);
             if (res?.questions?.length) {
-              questions = res.questions;
+              // Normalize questions — fix type mismatches from Gemini
+              questions = res.questions.map((q, idx) => {
+                let type = q.type;
+                // If options array is empty or missing, it must be integer type
+                if (!q.options || q.options.length === 0) type = "integer";
+                // If options has items, it must be mcq
+                if (q.options && q.options.length > 0) type = "mcq";
+                return {
+                  ...q,
+                  id: q.id || (idx + 1),
+                  type,
+                  options: type === "mcq" ? (q.options || []) : [],
+                  marks: Number(q.marks) || 4,
+                  negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0),
+                };
+              });
               geminiUsed = true;
               setMsg(`✅ Gemini extracted ${questions.length} questions!`, "success");
             } else {
@@ -608,7 +623,19 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
         try {
           const parsed = await parsePDF(paperB64, false, savedModel);
           if (parsed?.questions?.length) {
-            questions = parsed.questions;
+            questions = parsed.questions.map((q, idx) => {
+              let type = q.type;
+              if (!q.options || q.options.length === 0) type = "integer";
+              if (q.options && q.options.length > 0) type = "mcq";
+              return {
+                ...q,
+                id: q.id || (idx + 1),
+                type,
+                options: type === "mcq" ? (q.options || []) : [],
+                marks: Number(q.marks) || 4,
+                negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0),
+              };
+            });
             geminiUsed = true;
           } else {
             setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs.", "error");
@@ -1406,7 +1433,7 @@ function Countdown({ target }) {
    TEST SCREEN  (NTA-style)
 ───────────────────────────────────────────── */
 const Q_STATUS = { NV:"nv", NA:"na", ANS:"ans", MR:"mr", AMR:"amr" };
-const Q_COLORS = { nv:"#808080", na:"#c0392b", ans:"#27ae60", mr:"#8e44ad", amr:"#8e44ad" };
+const Q_COLORS = { nv:"#787878", na:"#c0392b", ans:"#26a541", mr:"#8b3fa8", amr:"#8b3fa8" };
 
 /* ─────────────────────────────────────────────
    TEST SCREEN  — NTA JEE style
@@ -1514,17 +1541,36 @@ function TestScreen({ test, student, onSubmit }) {
   return (
     <div style={{ height:"100vh", background:"#f0f2f5", fontFamily:"Arial, sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" }}>
 
-      {/* ── Top Header ── */}
-      <div style={{ background:"#1a237e", color:"white", padding:"0 16px", height:50, display:"flex", alignItems:"center", gap:12, flexShrink:0, borderBottom:"3px solid #ffca28" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <div style={{ background:"#ffca28", color:"#1a237e", fontWeight:900, fontSize:13, padding:"2px 8px", borderRadius:4 }}>NTA</div>
-          <span style={{ fontWeight:700, fontSize:13, opacity:0.9 }}>JEE (Main)</span>
-        </div>
-        <div style={{ flex:1, textAlign:"center", fontWeight:700, fontSize:14, opacity:0.95 }}>{test.title}</div>
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          <div style={{ fontSize:12, opacity:0.8 }}>👤 {student.name}</div>
-          <div style={{ background: timeLeft < 600 ? "#c62828" : "#0d47a1", borderRadius:6, padding:"5px 12px", fontWeight:900, fontSize:15, color: timerC, fontVariantNumeric:"tabular-nums", border:"1px solid rgba(255,255,255,0.3)" }}>
-            ⏱ {fmt(timeLeft)}
+      {/* ── Top Header — NTA Style ── */}
+      <div style={{ background:"#1a237e", color:"white", flexShrink:0, borderBottom:"3px solid #ffca28" }}>
+        <div style={{ display:"flex", alignItems:"center", padding:"0 16px", height:52 }}>
+          {/* Left: NTA Logo + Exam name */}
+          <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:200 }}>
+            <div style={{ background:"#ffca28", color:"#1a237e", fontWeight:900, fontSize:14, padding:"3px 10px", borderRadius:4, letterSpacing:1 }}>NTA</div>
+            <div>
+              <div style={{ fontWeight:800, fontSize:13, lineHeight:1.2 }}>JEE (Main)</div>
+              <div style={{ fontSize:10, opacity:0.6 }}>National Testing Agency</div>
+            </div>
+          </div>
+          {/* Center: Test title */}
+          <div style={{ flex:1, textAlign:"center" }}>
+            <div style={{ fontWeight:700, fontSize:14, opacity:0.95 }}>{test.title}</div>
+          </div>
+          {/* Right: Profile + Timer */}
+          <div style={{ display:"flex", alignItems:"center", gap:16, minWidth:200, justifyContent:"flex-end" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <div style={{ width:32, height:32, borderRadius:"50%", background:"#ffca28", color:"#1a237e", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:900, fontSize:13 }}>
+                {student.name[0].toUpperCase()}
+              </div>
+              <div style={{ fontSize:12 }}>
+                <div style={{ fontWeight:700 }}>{student.name}</div>
+                <div style={{ opacity:0.6, fontSize:10 }}>Candidate</div>
+              </div>
+            </div>
+            <div style={{ background: timeLeft < 600 ? "#b71c1c" : "#0a2472", borderRadius:6, padding:"6px 14px", fontWeight:900, fontSize:16, color: timerC, fontVariantNumeric:"tabular-nums", border:`1px solid ${timeLeft < 600 ? "#ef9a9a" : "rgba(255,255,255,0.3)"}`, textAlign:"center" }}>
+              <div style={{ fontSize:9, opacity:0.7, fontWeight:400, marginBottom:1 }}>Time Left</div>
+              {fmt(timeLeft)}
+            </div>
           </div>
         </div>
       </div>
@@ -1562,19 +1608,19 @@ function TestScreen({ test, student, onSubmit }) {
 
         {/* Question Panel */}
         <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-          {/* Question number bar */}
-          <div style={{ background:"#e8eaf6", borderBottom:"1px solid #c5cae9", padding:"8px 16px", display:"flex", alignItems:"center", gap:12, flexShrink:0 }}>
-            <span style={{ fontWeight:800, color:"#1a237e", fontSize:14 }}>
+          {/* Question number bar - NTA style */}
+          <div style={{ background:"#e8eaf6", borderBottom:"2px solid #c5cae9", padding:"8px 16px", display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+            <span style={{ fontWeight:800, color:"#1a237e", fontSize:13 }}>
               Question {subQs.findIndex(q => q.gi === curGi) + 1} of {subQs.length}
             </span>
-            <span style={{ background: subjectColor[activeSub] || "#1a237e", color:"white", borderRadius:4, padding:"2px 10px", fontSize:11, fontWeight:700 }}>
+            <span style={{ background: subjectColor[activeSub] || "#1a237e", color:"white", borderRadius:3, padding:"2px 10px", fontSize:11, fontWeight:700 }}>
               {activeSub}
             </span>
-            <span style={{ background: cur.type === "integer" ? "#fff3e0" : "#e3f2fd", color: cur.type === "integer" ? "#e65100" : "#1565c0", borderRadius:4, padding:"2px 10px", fontSize:11, fontWeight:700 }}>
-              {cur.type === "integer" ? "Numerical" : "MCQ"}
+            <span style={{ background: cur.type === "integer" ? "#fff8e1" : "#e3f2fd", color: cur.type === "integer" ? "#e65100" : "#1565c0", borderRadius:3, padding:"2px 10px", fontSize:11, fontWeight:700, border: cur.type === "integer" ? "1px solid #ffe082" : "1px solid #90caf9" }}>
+              {cur.type === "integer" ? "🔢 Numerical Integer" : "🅐 Multiple Choice"}
             </span>
-            <span style={{ marginLeft:"auto", fontSize:12, color:"#3949ab", fontWeight:700 }}>
-              Marks: +{Number(cur.marks)||4} | Negative: {Number(cur.negative)||"-1"}
+            <span style={{ marginLeft:"auto", background:"#1a237e", color:"white", borderRadius:4, padding:"3px 12px", fontSize:12, fontWeight:700 }}>
+              +{Number(cur.marks)||4} / {Number(cur.negative)||-1}
             </span>
           </div>
 
@@ -1612,18 +1658,29 @@ function TestScreen({ test, student, onSubmit }) {
               </div>
             ) : (
               <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px" }}>
-                <div style={{ fontSize:13, color:"#555", fontWeight:600, marginBottom:12 }}>Enter your answer (integer only):</div>
-                <input
-                  type="number"
-                  value={intInputs[curGi] ?? ""}
-                  onChange={e => setIntInputs(p => ({ ...p, [curGi]: e.target.value }))}
-                  placeholder="Type your answer..."
-                  style={{ padding:"14px 20px", borderRadius:6, border:"2px solid #1a237e", fontSize:22, fontWeight:700,
-                    width:"100%", maxWidth:300, outline:"none", textAlign:"center", display:"block",
-                    background:"#f8f9ff", boxSizing:"border-box", fontFamily:"Arial, sans-serif" }}
-                />
-                <div style={{ fontSize:12, color:"#888", marginTop:8 }}>
-                  Type numeric value only. No decimals accepted.
+                <div style={{ fontSize:13, color:"#1a237e", fontWeight:700, marginBottom:16 }}>
+                  📝 Numerical Answer Type — Enter Integer Value:
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+                  <input
+                    type="number"
+                    value={intInputs[curGi] !== undefined ? intInputs[curGi] : ""}
+                    onChange={e => setIntInputs(p => ({ ...p, [curGi]: e.target.value }))}
+                    onWheel={e => e.target.blur()}
+                    placeholder="0"
+                    style={{ padding:"16px 20px", borderRadius:6, border:"2px solid #1a237e", fontSize:28, fontWeight:700,
+                      width:220, outline:"none", textAlign:"center", display:"block",
+                      background:"#f8f9ff", boxSizing:"border-box", fontFamily:"Arial, sans-serif",
+                      color:"#1a237e" }}
+                  />
+                  {intInputs[curGi] !== undefined && intInputs[curGi] !== "" && (
+                    <div style={{ background:"#e8f5e9", border:"1px solid #a5d6a7", borderRadius:8, padding:"8px 16px", fontSize:14, color:"#2e7d32", fontWeight:700 }}>
+                      ✅ Answer: {intInputs[curGi]}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
+                  Enter integer only. Use CLEAR RESPONSE button to reset.
                 </div>
               </div>
             )}
@@ -1693,28 +1750,34 @@ function TestScreen({ test, student, onSubmit }) {
 
         {/* ── Right Sidebar — Question Palette ── */}
         <div style={{ width:260, background:"white", borderLeft:"2px solid #e0e0e0", display:"flex", flexDirection:"column", flexShrink:0 }}>
-          {/* Student info */}
-          <div style={{ background:"#1a237e", color:"white", padding:"12px 14px", borderBottom:"2px solid #ffca28" }}>
-            <div style={{ fontWeight:700, fontSize:13 }}>👤 {student.name}</div>
-            <div style={{ fontSize:11, opacity:0.7, marginTop:2 }}>JEE Main — {test.title}</div>
+          {/* Student info - NTA style with photo box */}
+          <div style={{ background:"#1a237e", color:"white", padding:"10px 12px", borderBottom:"2px solid #ffca28", display:"flex", alignItems:"center", gap:10 }}>
+            <div style={{ width:48, height:56, borderRadius:4, background:"#e8eaf6", border:"2px solid #ffca28", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, overflow:"hidden" }}>
+              <div style={{ fontWeight:900, fontSize:20, color:"#1a237e" }}>{student.name[0].toUpperCase()}</div>
+            </div>
+            <div>
+              <div style={{ fontWeight:800, fontSize:13 }}>{student.name}</div>
+              <div style={{ fontSize:10, opacity:0.7, marginTop:1 }}>JEE Main — {test.title}</div>
+              <div style={{ fontSize:10, opacity:0.6, marginTop:1 }}>Total: <b style={{ color:"#ffca28" }}>{answeredCount}/{allQs.length}</b> answered</div>
+            </div>
           </div>
 
-          {/* Legend */}
-          <div style={{ padding:"12px 14px", borderBottom:"1px solid #eee", background:"#fafafa" }}>
-            <div style={{ fontWeight:700, fontSize:11, color:"#555", marginBottom:8, textTransform:"uppercase", letterSpacing:0.5 }}>Legend</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"5px 10px" }}>
+          {/* Legend - NTA exact style */}
+          <div style={{ padding:"10px 12px", borderBottom:"1px solid #ddd", background:"#f5f5f5" }}>
+            <div style={{ fontWeight:700, fontSize:11, color:"#333", marginBottom:8, letterSpacing:0.3 }}>Question Status</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
               {[
-                { s:Q_STATUS.ANS, l:"Answered", c:"#27ae60" },
-                { s:Q_STATUS.NA,  l:"Not Answered", c:"#c0392b" },
-                { s:Q_STATUS.MR,  l:"Marked Review", c:"#8e44ad" },
-                { s:Q_STATUS.AMR, l:"Ans+Marked", c:"#8e44ad" },
-                { s:Q_STATUS.NV,  l:"Not Visited", c:"#808080" },
-              ].map(({ s, l, c }) => (
-                <div key={s} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11 }}>
-                  <div style={{ width:22, height:22, borderRadius:4, background:c, color:"white", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:10, flexShrink:0 }}>
+                { s:Q_STATUS.ANS, l:"Answered",           c:"#26a541", shape:"circle" },
+                { s:Q_STATUS.NA,  l:"Not Answered",        c:"#c0392b", shape:"circle" },
+                { s:Q_STATUS.MR,  l:"Marked for Review",   c:"#8b3fa8", shape:"circle" },
+                { s:Q_STATUS.AMR, l:"Answered & Marked",   c:"#8b3fa8", shape:"circle" },
+                { s:Q_STATUS.NV,  l:"Not Visited",         c:"#787878", shape:"circle" },
+              ].map(({ s, l, c: col, shape }) => (
+                <div key={s} style={{ display:"flex", alignItems:"center", gap:8, fontSize:11 }}>
+                  <div style={{ width:26, height:26, borderRadius:"50%", background:col, color:"white", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:11, flexShrink:0 }}>
                     {counts[s] || 0}
                   </div>
-                  <span style={{ color:"#444", lineHeight:1.2 }}>{l}</span>
+                  <span style={{ color:"#333", fontSize:11 }}>{l}</span>
                 </div>
               ))}
             </div>
@@ -1729,14 +1792,16 @@ function TestScreen({ test, student, onSubmit }) {
               {subQs.map((q, localI) => {
                 const isActive = q.gi === curGi;
                 const st = qStatus[q.gi] || Q_STATUS.NV;
+                // NTA: all palette items are circles
                 return (
                   <div key={q.gi} onClick={() => setGlobalIdx(q.gi)}
-                    style={{ width:36, height:36, borderRadius: st === Q_STATUS.MR || st === Q_STATUS.AMR ? "50%" : 4,
+                    style={{ width:34, height:34, borderRadius:"50%",
                       background: isActive ? "#1a237e" : Q_COLORS[st],
                       color:"white", display:"flex", alignItems:"center", justifyContent:"center",
-                      fontSize:12, fontWeight:800, cursor:"pointer",
-                      border: isActive ? "3px solid #ffca28" : "none",
-                      boxShadow: isActive ? "0 0 0 2px #1a237e" : "none" }}>
+                      fontSize:11, fontWeight:800, cursor:"pointer",
+                      border: isActive ? "3px solid #ffca28" : "2px solid rgba(0,0,0,0.1)",
+                      boxShadow: isActive ? "0 0 0 2px #1a237e, 0 2px 4px rgba(0,0,0,0.2)" : "0 1px 2px rgba(0,0,0,0.15)",
+                      transition:"all 0.1s" }}>
                     {localI + 1}
                   </div>
                 );
