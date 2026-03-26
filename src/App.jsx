@@ -60,6 +60,79 @@ function buildResultUrl(testId, studentName) {
 }
 
 /* ─────────────────────────────────────────────
+   LATEX / MATH RENDERER
+   Converts \frac, \sqrt, \times, \alpha etc → readable Unicode
+───────────────────────────────────────────── */
+function renderMath(text) {
+  if (!text) return text;
+  let s = String(text);
+  // \frac{a}{b} → (a/b) — run multiple passes for nested fracs
+  for (let i = 0; i < 6; i++) s = s.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1/$2)");
+  // \sqrt{x} → √x
+  s = s.replace(/\\sqrt\{([^{}]+)\}/g, "√($1)");
+  s = s.replace(/\\sqrt\s*(\S+)/g, "√$1");
+  // Operators
+  s = s.replace(/\\times/g, "×").replace(/\\cdot/g, "·").replace(/\\pm/g, "±")
+       .replace(/\\div/g, "÷").replace(/\\leq/g, "≤").replace(/\\geq/g, "≥")
+       .replace(/\\neq/g, "≠").replace(/\\approx/g, "≈").replace(/\\infty/g, "∞")
+       .replace(/\\rightarrow/g, "→").replace(/\\leftarrow/g, "←")
+       .replace(/\\Rightarrow/g, "⇒").replace(/\\Leftarrow/g, "⇐")
+       .replace(/\\leftrightarrow/g, "↔").replace(/\\propto/g, "∝")
+       .replace(/\\perp/g, "⊥").replace(/\\parallel/g, "∥")
+       .replace(/\\angle/g, "∠").replace(/\\triangle/g, "△")
+       .replace(/\\degree/g, "°").replace(/\\circ/g, "°");
+  // Greek lowercase
+  s = s.replace(/\\alpha/g,"α").replace(/\\beta/g,"β").replace(/\\gamma/g,"γ")
+       .replace(/\\delta/g,"δ").replace(/\\epsilon/g,"ε").replace(/\\varepsilon/g,"ε")
+       .replace(/\\zeta/g,"ζ").replace(/\\eta/g,"η").replace(/\\theta/g,"θ")
+       .replace(/\\vartheta/g,"θ").replace(/\\iota/g,"ι").replace(/\\kappa/g,"κ")
+       .replace(/\\lambda/g,"λ").replace(/\\mu/g,"μ").replace(/\\nu/g,"ν")
+       .replace(/\\xi/g,"ξ").replace(/\\pi/g,"π").replace(/\\varpi/g,"π")
+       .replace(/\\rho/g,"ρ").replace(/\\varrho/g,"ρ").replace(/\\sigma/g,"σ")
+       .replace(/\\tau/g,"τ").replace(/\\upsilon/g,"υ").replace(/\\phi/g,"φ")
+       .replace(/\\varphi/g,"φ").replace(/\\chi/g,"χ").replace(/\\psi/g,"ψ")
+       .replace(/\\omega/g,"ω");
+  // Greek uppercase
+  s = s.replace(/\\Gamma/g,"Γ").replace(/\\Delta/g,"Δ").replace(/\\Theta/g,"Θ")
+       .replace(/\\Lambda/g,"Λ").replace(/\\Xi/g,"Ξ").replace(/\\Pi/g,"Π")
+       .replace(/\\Sigma/g,"Σ").replace(/\\Upsilon/g,"Υ").replace(/\\Phi/g,"Φ")
+       .replace(/\\Psi/g,"Ψ").replace(/\\Omega/g,"Ω");
+  // Superscripts ^{...} and ^x
+  s = s.replace(/\^\{([^{}]+)\}/g, (_, e) => e.split("").map(c=>({
+    "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹",
+    "+":"⁺","-":"⁻","n":"ⁿ","a":"ᵃ","b":"ᵇ","c":"ᶜ","x":"ˣ","y":"ʸ","z":"ᶻ"
+  }[c]||("^"+c))).join(""));
+  s = s.replace(/\^(\d)/g, (_, d) => ({"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹"}[d]||("^"+d)));
+  // Subscripts _{...} and _x
+  s = s.replace(/\_\{([^{}]+)\}/g, (_, e) => e.split("").map(c=>({
+    "0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉",
+    "a":"ₐ","e":"ₑ","o":"ₒ","n":"ₙ","i":"ᵢ","r":"ᵣ","u":"ᵤ","v":"ᵥ","x":"ₓ"
+  }[c]||("_"+c))).join(""));
+  s = s.replace(/\_(\d)/g, (_, d) => ({"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉"}[d]||("_"+d)));
+  // Integrals, sums
+  s = s.replace(/\\int/g,"∫").replace(/\\oint/g,"∮").replace(/\\sum/g,"∑").replace(/\\prod/g,"∏");
+  // Vectors, hats
+  s = s.replace(/\\vec\{([^{}]+)\}/g,"$1⃗").replace(/\\hat\{([^{}]+)\}/g,"$1̂").replace(/\\bar\{([^{}]+)\}/g,"$1̄");
+  // Brackets
+  s = s.replace(/\\left\s*\(/g,"(").replace(/\\right\s*\)/g,")");
+  s = s.replace(/\\left\s*\[/g,"[").replace(/\\right\s*\]/g,"]");
+  s = s.replace(/\\left\s*\{/g,"{").replace(/\\right\s*\}/g,"}");
+  s = s.replace(/\\left\s*\|/g,"|").replace(/\\right\s*\|/g,"|");
+  s = s.replace(/\\langle/g,"⟨").replace(/\\rangle/g,"⟩");
+  // Remove remaining braces used for grouping
+  s = s.replace(/\{([^{}]*)\}/g,"$1");
+  // \text{...} → ...
+  s = s.replace(/\\text\s*\{([^{}]*)\}/g,"$1");
+  // Remove $ delimiters
+  s = s.replace(/\$\$([^$]+)\$\$/g,"$1").replace(/\$([^$]+)\$/g,"$1");
+  // Remove remaining lone backslash commands
+  s = s.replace(/\\([a-zA-Z]+)\s*/g,"$1 ");
+  // Clean extra spaces
+  s = s.replace(/  +/g," ").trim();
+  return s;
+}
+
+/* ─────────────────────────────────────────────
    DEMO QUESTIONS
 ───────────────────────────────────────────── */
 const DEMO_QUESTIONS = [
@@ -161,6 +234,21 @@ export default function App() {
   const [submission, setSubmission] = useState(null);
   const [directTestId, setDirectTestId] = useState(null);
   const [directResult, setDirectResult] = useState(null);
+  const [serverReady, setServerReady] = useState(true);
+
+  // Health check at App level so ALL screens get the right value
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const r = await fetch("/api/health", { signal: AbortSignal.timeout(5000) });
+        setServerReady(r.ok);
+      } catch {
+        setServerReady(false);
+        setTimeout(check, 8000);
+      }
+    };
+    check();
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -268,11 +356,11 @@ export default function App() {
 
   if (page === "shared-result") return <SharedResultScreen data={directResult} />;
   if (page === "login") return <LoginScreen onLogin={login} tests={tests} directTestId={directTestId} />;
-  if (page === "admin") return <AdminScreen user={user} tests={tests} onSaveTests={saveTests} onLogout={doLogout} />;
+  if (page === "admin") return <AdminScreen user={user} tests={tests} onSaveTests={saveTests} onLogout={doLogout} serverReady={serverReady} />;
   if (page === "student") return (
     <StudentScreen user={user} tests={tests}
       onStart={(test) => { setActiveTest(test); setPage("test"); }}
-      onLogout={doLogout} />
+      onLogout={doLogout} serverReady={serverReady} />
   );
   if (page === "test") return (
     <TestScreen test={activeTest} student={user} onSubmit={handleSubmit} />
@@ -389,24 +477,8 @@ function LoginScreen({ onLogin, tests, directTestId }) {
 /* ─────────────────────────────────────────────
    ADMIN SCREEN
 ───────────────────────────────────────────── */
-function AdminScreen({ user, tests, onSaveTests, onLogout }) {
+function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
   const [view, setView] = useState("dashboard");
-  const [serverReady, setServerReady] = useState(true);
-
-  // Check if server is awake on mount — show warning if cold-starting
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const r = await fetch("/api/health", { signal: AbortSignal.timeout(4000) });
-        setServerReady(r.ok);
-      } catch {
-        setServerReady(false);
-        // Retry after 8 seconds
-        setTimeout(check, 8000);
-      }
-    };
-    check();
-  }, []);
 
   const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
   const [paperFile, setPaperFile] = useState(null);
@@ -1224,7 +1296,7 @@ function StudentPasswordRow({ sp, onRemove, onUpdate }) {
 /* ─────────────────────────────────────────────
    STUDENT SCREEN
 ───────────────────────────────────────────── */
-function StudentScreen({ user, tests, onStart, onLogout }) {
+function StudentScreen({ user, tests, onStart, onLogout, serverReady }) {
   const available = tests.filter(t => getTestStatus(t) === TEST_STATUS.LIVE);
   const upcoming = tests.filter(t => getTestStatus(t) === TEST_STATUS.SCHEDULED);
   const ended = tests.filter(t => getTestStatus(t) === TEST_STATUS.ENDED);
@@ -1411,7 +1483,7 @@ function TestScreen({ test, student, onSubmit }) {
               </div>
               <span style={{ fontSize:12, color:"#777" }}>+{cur.marks} / {cur.negative}</span>
             </div>
-            <p style={{ fontSize:14, lineHeight:1.85, color:"#222", margin:"0 0 22px" }}>{cur.text}</p>
+            <p style={{ fontSize:14, lineHeight:1.85, color:"#222", margin:"0 0 22px", whiteSpace:"pre-wrap" }}>{renderMath(cur.text)}</p>
             {cur.type==="mcq" ? (
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
                 {cur.options.map((opt,oi)=>{
@@ -1420,16 +1492,22 @@ function TestScreen({ test, student, onSubmit }) {
                     <div key={oi} onClick={()=>setAnswers(p=>({...p,[idx]:oi}))}
                       style={{ padding:"12px 16px", borderRadius:10, border:`2px solid ${sel?"#3949ab":"#e8e8e8"}`, background:sel?"#e8eaf6":"white", cursor:"pointer", display:"flex", gap:12, alignItems:"center" }}>
                       <div style={{ width:26, height:26, borderRadius:"50%", background:sel?"#3949ab":"#f0f0f0", color:sel?"white":"#666", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:12, flexShrink:0 }}>{["A","B","C","D"][oi]}</div>
-                      <span style={{ fontSize:13 }}>{opt}</span>
+                      <span style={{ fontSize:13 }}>{renderMath(opt)}</span>
                     </div>
                   );
                 })}
               </div>
             ) : (
               <div>
-                <div style={{ fontSize:13, color:"#666", fontWeight:600, marginBottom:8 }}>Enter Integer Answer:</div>
-                <input type="number" value={intInputs[idx]||""} onChange={e=>setIntInputs(p=>({...p,[idx]:e.target.value}))}
-                  style={{ padding:"12px 16px", borderRadius:10, border:"2px solid #3949ab", fontSize:18, fontWeight:700, width:180, outline:"none", textAlign:"center" }} />
+                <div style={{ fontSize:13, color:"#666", fontWeight:600, marginBottom:10 }}>Enter your integer answer:</div>
+                <input
+                  type="number"
+                  value={intInputs[idx]??""} 
+                  onChange={e=>setIntInputs(p=>({...p,[idx]:e.target.value}))}
+                  placeholder="Type answer here..."
+                  style={{ padding:"14px 20px", borderRadius:12, border:"2px solid #3949ab", fontSize:20, fontWeight:700, width:"100%", maxWidth:280, outline:"none", textAlign:"center", display:"block", background:"#f0f4ff", boxSizing:"border-box" }}
+                />
+                <div style={{ fontSize:12, color:"#888", marginTop:8 }}>Only integer values accepted (e.g. 12, 24, 100)</div>
               </div>
             )}
           </div>
@@ -1508,7 +1586,9 @@ function ResultsScreen({ test, student, submission, onBack }) {
     const blank = given===undefined||given===null||given===""||( typeof given==="number"&&isNaN(given));
     const correct = !blank && String(given)===String(q.correct);
     const wrong = !blank && !correct;
-    return { ...q, given, isCorrect:correct, isWrong:wrong, isSkipped:blank, earned: correct?q.marks:wrong?q.negative:0 };
+    const qMarks = Number(q.marks)||4;
+    const qNeg = (q.negative!==undefined&&q.negative!==null)?Number(q.negative):-1;
+    return { ...q, marks:qMarks, negative:qNeg, given, isCorrect:correct, isWrong:wrong, isSkipped:blank, earned: correct?qMarks:wrong?qNeg:0 };
   });
 
   const maxMarks = results.reduce((s,r)=>s+r.marks,0);
@@ -1516,7 +1596,7 @@ function ResultsScreen({ test, student, submission, onBack }) {
   const nCorrect = results.filter(r=>r.isCorrect).length;
   const nWrong = results.filter(r=>r.isWrong).length;
   const nSkip = results.filter(r=>r.isSkipped).length;
-  const pct = Math.max(0,Math.round((scored/maxMarks)*100));
+  const pct = maxMarks>0 ? Math.max(0,Math.round((scored/maxMarks)*100)) : 0;
   const grade = pct>=85?"A+":pct>=70?"A":pct>=55?"B":pct>=40?"C":"D";
   const gradeC = pct>=70?"#2e7d32":pct>=40?"#f57c00":"#e53935";
 
@@ -1613,13 +1693,13 @@ function ResultsScreen({ test, student, submission, onBack }) {
               </div>
               {expanded===i && (
                 <div style={{ padding:"0 18px 18px", borderTop:`1px solid ${border}` }}>
-                  <p style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75 }}>{r.text}</p>
+                  <p style={{ margin:"12px 0 14px", fontSize:13, lineHeight:1.75, whiteSpace:"pre-wrap" }}>{renderMath(r.text)}</p>
                   {r.type==="mcq" ? r.options.map((opt,oi)=>(
                     <div key={oi} style={{ padding:"8px 12px", borderRadius:8, marginBottom:6, fontSize:13,
                       background:String(r.correct)===String(oi)?"#c8e6c9":String(r.given)===String(oi)?"#ffcdd2":"white",
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
-                      {["A","B","C","D"][oi]}) {opt}
+                      {["A","B","C","D"][oi]}) {renderMath(opt)}
                       {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
                       {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
@@ -1669,7 +1749,9 @@ function SharedResultScreen({ data }) {
     const blank = given===undefined||given===null||given===""||( typeof given==="number"&&isNaN(given));
     const correct = !blank && String(given)===String(q.correct);
     const wrong = !blank && !correct;
-    return { ...q, given, isCorrect:correct, isWrong:wrong, isSkipped:blank, earned: correct?q.marks:wrong?q.negative:0 };
+    const qMarks = Number(q.marks)||4;
+    const qNeg = (q.negative!==undefined&&q.negative!==null)?Number(q.negative):-1;
+    return { ...q, marks:qMarks, negative:qNeg, given, isCorrect:correct, isWrong:wrong, isSkipped:blank, earned: correct?qMarks:wrong?qNeg:0 };
   });
 
   const maxMarks = results.reduce((s,r)=>s+r.marks,0);
@@ -1677,7 +1759,7 @@ function SharedResultScreen({ data }) {
   const nCorrect = results.filter(r=>r.isCorrect).length;
   const nWrong = results.filter(r=>r.isWrong).length;
   const nSkip = results.filter(r=>r.isSkipped).length;
-  const pct = Math.max(0,Math.round((scored/maxMarks)*100));
+  const pct = maxMarks>0 ? Math.max(0,Math.round((scored/maxMarks)*100)) : 0;
   const grade = pct>=85?"A+":pct>=70?"A":pct>=55?"B":pct>=40?"C":"D";
   const gradeC = pct>=70?"#2e7d32":pct>=40?"#f57c00":"#e53935";
 
