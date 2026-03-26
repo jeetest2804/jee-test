@@ -108,16 +108,32 @@ app.post("/api/parse-pdf", async (req, res) => {
   if (!base64) return res.status(400).json({ error: "Missing base64 PDF data" });
 
   const prompt = isKey
-    ? `Extract answer key from this JEE PDF. Return ONLY valid JSON — no markdown:
-{"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
-- For MCQ: correct is 0-based index (0=A,1=B,2=C,3=D). For integer: correct is the number.`
-    : `Extract ALL questions from this JEE exam PDF. Return ONLY valid JSON — no markdown:
-{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"...","options":["opt1","opt2","opt3","opt4"],"correct":2,"marks":4,"negative":-1}]}
-- subject: "Physics", "Chemistry", or "Mathematics" only
-- type: "mcq" for 4-option, "integer" for numeric (set options=[])
-- correct: 0-based index for MCQ, numeric value for integer
-- NO "A)" "B)" prefixes in options text
-- Extract EVERY question. Output pure JSON only.`;
+    ? `Extract the answer key from this JEE PDF. Return ONLY valid JSON, no markdown, no extra text.
+FORMAT: {"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
+RULES:
+- q = question number
+- For MCQ: correct = 0-based index (0=A, 1=B, 2=C, 3=D)
+- For integer: correct = the numeric answer
+- Include every question. Output ONLY JSON.`
+    : `You are extracting ALL questions from a JEE exam PDF. Extract EVERY question — do not stop early.
+A full JEE paper has 75-90 questions across Physics, Chemistry and Mathematics.
+
+Return ONLY a valid JSON object — no markdown, no explanation:
+{"questions":[
+{"id":1,"subject":"Physics","type":"mcq","text":"full question text","options":["option A text","option B text","option C text","option D text"],"correct":2,"marks":4,"negative":-1},
+{"id":2,"subject":"Physics","type":"integer","text":"full question text","options":[],"correct":5,"marks":4,"negative":0}
+]}
+
+FIELD RULES:
+- id: question number starting from 1, sequential
+- subject: EXACTLY "Physics", "Chemistry", or "Mathematics" — nothing else
+- type: "mcq" for 4-option questions, "integer" for numeric answer questions
+- text: the complete full question text
+- options: 4 strings for MCQ (NO "A)" "B)" prefixes), empty array [] for integer
+- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual number for integer
+- marks: 4 (usual), negative: -1 for MCQ, 0 for integer
+
+IMPORTANT: Extract ALL questions. Do not skip any. Output ONLY the JSON.`;
 
   // Get live model list, try requested model first
   const allModels = await getAvailableModels(geminiApiKey);
@@ -140,7 +156,7 @@ app.post("/api/parse-pdf", async (req, res) => {
               { inline_data: { mime_type: "application/pdf", data: base64 } },
               { text: prompt },
             ]}],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 16384 },
+            generationConfig: { temperature: 0.1, maxOutputTokens: 32768 },
           }),
         }
       );
