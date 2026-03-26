@@ -381,7 +381,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [newSP, setNewSP] = useState({ name:"", username:"", password:"" });
   const [spMsg, setSpMsg] = useState("");
   const [savedDriveKey, setSavedDriveKey] = useState("");
-  const [savedModel, setSavedModel] = useState("gemini-2.0-flash-exp");
+  const [savedModel, setSavedModel] = useState("gemini-2.0-flash");
   const paperRef = useRef(); const keyRef = useRef();
 
   useEffect(() => {
@@ -391,7 +391,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
       const driveKey = await dbGet("drive-api-key") || "";
       setSavedDriveKey(driveKey);
       setForm(f => ({ ...f, driveApiKey: driveKey }));
-      const model = await dbGet("gemini-model") || "gemini-2.0-flash-exp";
+      const model = await dbGet("gemini-model") || "gemini-2.0-flash";
       setSavedModel(model);
     })();
   }, []);
@@ -848,12 +848,12 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 ───────────────────────────────────────────── */
 function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const [drive, setDrive] = useState(savedDriveKey || "");
-  const [model, setModel] = useState(savedModel || "gemini-2.0-flash-exp");
+  const [model, setModel] = useState(savedModel || "gemini-2.0-flash");
   const [msg, setMsg] = useState("");
   const [showDrive, setShowDrive] = useState(false);
 
   useEffect(() => { setDrive(savedDriveKey || ""); }, [savedDriveKey]);
-  useEffect(() => { setModel(savedModel || "gemini-2.0-flash-exp"); }, [savedModel]);
+  useEffect(() => { setModel(savedModel || "gemini-2.0-flash"); }, [savedModel]);
 
   const save = async () => {
     await onSave(drive.trim(), model);
@@ -864,11 +864,10 @@ function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const maskKey = (k) => k.length > 8 ? k.slice(0,6) + "••••••••" + k.slice(-4) : k ? "••••••••" : "";
 
   const MODELS = [
-    { id: "gemini-2.0-flash-exp",           label: "Gemini 2.0 Flash Exp",   limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best free option — fast + capable" },
-    { id: "gemini-1.5-flash-latest",         label: "Gemini 1.5 Flash",        limit: "1500 req/day", badge: "✅ Stable",       badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Very reliable, great for PDFs" },
-    { id: "gemini-2.0-flash",               label: "Gemini 2.0 Flash",        limit: "1500 req/day", badge: "🆕 New",          badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Latest 2.0 model, very fast" },
-    { id: "gemini-1.5-flash-002",           label: "Gemini 1.5 Flash 002",    limit: "1500 req/day", badge: "🔄 Alternate",    badgeColor: "#00695c", badgeBg: "#e0f2f1", note: "Alternate 1.5 flash version" },
-    { id: "gemini-2.5-flash-preview-05-20", label: "Gemini 2.5 Flash",        limit: "500 req/day",  badge: "🧠 Smartest",     badgeColor: "#e65100", badgeBg: "#fff3e0", note: "Best accuracy, use for tough PDFs" },
+    { id: "gemini-2.0-flash",      label: "Gemini 2.0 Flash",      limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best overall — fast, reliable, great for PDFs" },
+    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite",  limit: "1500 req/day", badge: "🚀 Fastest",      badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Fastest response, use if quota is tight" },
+    { id: "gemini-1.5-flash",      label: "Gemini 1.5 Flash",       limit: "1500 req/day", badge: "✅ Stable",       badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Very stable, proven to work well" },
+    { id: "gemini-1.5-flash-8b",   label: "Gemini 1.5 Flash 8B",    limit: "1500 req/day", badge: "🔄 Fallback",     badgeColor: "#00695c", badgeBg: "#e0f2f1", note: "Smallest model, use as last resort" },
   ];
 
   return (
