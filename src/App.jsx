@@ -134,10 +134,240 @@ function renderMath(text) {
 
 /* ─────────────────────────────────────────────
    FIGURE / DIAGRAM RENDERER
-   Parses [FIGURE: description] tags from question text
-   and renders them as styled diagram boxes
+   Parses [FIGURE: description] tags and renders actual SVG diagrams
 ───────────────────────────────────────────── */
-function renderQuestionText(text) {
+
+/* ── Smart diagram builder: converts text descriptions → SVG paths ── */
+function DiagramSVG({ desc, compact }) {
+  const d = desc.toLowerCase();
+  const W = compact ? 160 : 220;
+  const H = compact ? 120 : 160;
+  const ox = 32, oy = H - 24; // origin x,y
+  const gw = W - ox - 12;     // graph width
+  const gh = oy - 12;          // graph height
+
+  // Detect axis labels from description
+  const xLabel = d.includes("t)") || d.includes("time") ? "t" :
+                 d.includes("x)") ? "x" : d.includes("v)") ? "v" : "x";
+  const yLabel = d.includes("a-t") || d.includes("acceleration") ? "a" :
+                 d.includes("v-t") || d.includes("velocity") ? "v" :
+                 d.includes("displacement") ? "s" :
+                 d.includes("current") ? "I" :
+                 d.includes("force") ? "F" :
+                 d.includes("pressure") ? "P" : "y";
+
+  // Build path segments from description keywords
+  const segments = [];
+
+  // Helper to add a segment
+  const seg = (x1, y1, x2, y2) => segments.push({ x1, y1, x2, y2 });
+
+  // Coordinate helpers (% of graph area → SVG px)
+  const px = (frac) => ox + frac * gw;
+  const py = (frac) => oy - frac * gh; // frac=0 → bottom, frac=1 → top
+
+  // ── Pattern detection ──
+  const isAT = yLabel === "a";
+  const isVT = yLabel === "v";
+
+  // "remains 0 / stays at zero" for initial period
+  const startsZero = d.includes("remains at 0") || d.includes("remains 0") ||
+                     d.includes("starts at a=0") || d.includes("starts at 0") ||
+                     d.includes("a=0, t=0") || d.includes("remains a=0");
+  const zeroEnd = startsZero ? 0.35 : 0;
+
+  // "increases linearly" / "linear increase"
+  const linearUp = d.includes("increases linearly") || d.includes("linear increase") ||
+                   d.includes("linearly with time") || d.includes("increases linear");
+  // "increases with a curve / parabola / concave"
+  const curveUp = d.includes("parabola") || d.includes("concave up") ||
+                  d.includes("curves upward") || d.includes("curve");
+  // "constant" (horizontal plateau)
+  const constant = d.includes("constant") && !d.includes("not constant");
+  // "jumps / abruptly jumps / suddenly" to a value
+  const jumps = d.includes("jump") || d.includes("abrupt") || d.includes("sudden");
+  // "drops / decreases / falls"
+  const drops = d.includes("drop") || d.includes("decrease") || d.includes("fall") ||
+                d.includes("goes to zero") || d.includes("back to zero");
+  // "then increases linearly again" after a drop
+  const linearAgain = d.includes("then increases linearly again") ||
+                      d.includes("increases linearly again");
+
+  // Determine which graph pattern to draw
+  // Pattern A: zero → curve up (parabola-like)
+  // Pattern B: zero → jump → linear up (or zero → jump → constant → linear)
+  // Pattern C: zero → jump → linear up (simpler)
+  // Pattern D: zero → jump → constant → drop to zero (step then flat)
+  // Pattern E: zero → jump → constant (flat at top)
+  // Pattern F: purely linear from origin
+  // Pattern G: linear then drops to lower constant then linear again
+
+  let pathD = "";
+  let extraPaths = []; // for curves needing bezier
+
+  if (startsZero && curveUp) {
+    // Pattern A: flat then parabola curve
+    // flat from 0 to zeroEnd
+    seg(px(0), py(0), px(zeroEnd), py(0));
+    // bezier curve from zeroEnd to right edge going up
+    const cx1 = px(zeroEnd + 0.2), cy1 = py(0.05);
+    const cx2 = px(0.85), cy2 = py(0.6);
+    const ex = px(1), ey = py(0.95);
+    extraPaths.push(`M ${px(zeroEnd)} ${py(0)} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`);
+
+  } else if (startsZero && jumps && constant && drops && linearAgain) {
+    // Pattern G (like Graph B in original): zero → jump → linear → drop → linear
+    seg(px(0), py(0), px(0.3), py(0));        // flat zero
+    seg(px(0.3), py(0.42), px(0.55), py(0.42)); // jump to mid, then flat briefly
+    seg(px(0.3), py(0), px(0.3), py(0.42));    // vertical jump
+    seg(px(0.55), py(0.42), px(0.56), py(0.2)); // drop to lower
+    seg(px(0.56), py(0.2), px(1.0), py(0.78)); // then increases linearly
+
+  } else if (startsZero && jumps && linearUp && !constant) {
+    // Pattern C: zero → jump → linearly increasing
+    seg(px(0), py(0), px(zeroEnd), py(0));
+    seg(px(zeroEnd), py(0), px(zeroEnd), py(0.28)); // vertical jump
+    seg(px(zeroEnd), py(0.28), px(1.0), py(0.95));  // linear up
+
+  } else if (startsZero && jumps && constant && drops) {
+    // Pattern D: zero → jump → constant plateau → drop to zero
+    seg(px(0), py(0), px(0.3), py(0));
+    seg(px(0.3), py(0), px(0.3), py(0.6));      // vertical jump
+    seg(px(0.3), py(0.6), px(0.68), py(0.6));   // flat
+    seg(px(0.68), py(0.6), px(0.68), py(0));    // drop to zero
+    seg(px(0.68), py(0), px(1.0), py(0));        // stays zero
+
+  } else if (startsZero && jumps && constant) {
+    // Pattern E: zero → jump → flat constant
+    seg(px(0), py(0), px(zeroEnd), py(0));
+    seg(px(zeroEnd), py(0), px(zeroEnd), py(0.65)); // vertical jump
+    seg(px(zeroEnd), py(0.65), px(1.0), py(0.65));  // flat at top
+
+  } else if (startsZero && linearUp) {
+    // Pattern C simple: flat zero then linear
+    seg(px(0), py(0), px(zeroEnd), py(0));
+    seg(px(zeroEnd), py(0), px(1.0), py(0.95));
+
+  } else if (linearUp && !startsZero) {
+    // Straight line from origin
+    seg(px(0), py(0), px(1.0), py(0.95));
+
+  } else if (constant && !startsZero && !drops) {
+    // Horizontal line (constant value)
+    seg(px(0), py(0.6), px(1.0), py(0.6));
+
+  } else {
+    // Default: simple linear from origin
+    seg(px(0), py(0), px(1.0), py(0.85));
+  }
+
+  const lineColor = "#1a237e";
+  const fontSize = compact ? 9 : 11;
+
+  return (
+    <svg width={W} height={H} style={{ display:"block" }}>
+      {/* Grid lines (subtle) */}
+      {[0.25,0.5,0.75].map(f => (
+        <line key={`gx${f}`} x1={px(f)} y1={12} x2={px(f)} y2={oy}
+          stroke="#e0e0e0" strokeWidth={0.5} strokeDasharray="3,3" />
+      ))}
+      {[0.33,0.66].map(f => (
+        <line key={`gy${f}`} x1={ox} y1={py(f)} x2={W-8} y2={py(f)}
+          stroke="#e0e0e0" strokeWidth={0.5} strokeDasharray="3,3" />
+      ))}
+
+      {/* Axes */}
+      {/* Y axis */}
+      <line x1={ox} y1={oy} x2={ox} y2={8} stroke="#333" strokeWidth={1.5} />
+      <polygon points={`${ox},8 ${ox-4},16 ${ox+4},16`} fill="#333" />
+      {/* X axis */}
+      <line x1={ox} y1={oy} x2={W-6} y2={oy} stroke="#333" strokeWidth={1.5} />
+      <polygon points={`${W-6},${oy} ${W-14},${oy-4} ${W-14},${oy+4}`} fill="#333" />
+
+      {/* Origin label */}
+      <text x={ox-10} y={oy+12} fontSize={fontSize} fill="#555">O</text>
+
+      {/* Axis labels */}
+      <text x={W-10} y={oy+12} fontSize={fontSize} fontStyle="italic" fill="#333">{xLabel}</text>
+      <text x={4} y={14} fontSize={fontSize} fontStyle="italic" fill="#333">{yLabel}</text>
+
+      {/* Graph segments */}
+      {segments.map((s, i) => (
+        <line key={i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
+          stroke={lineColor} strokeWidth={compact ? 1.8 : 2.2}
+          strokeLinecap="round" />
+      ))}
+
+      {/* Bezier curves */}
+      {extraPaths.map((p, i) => (
+        <path key={`ep${i}`} d={p} stroke={lineColor} strokeWidth={compact ? 1.8 : 2.2}
+          fill="none" strokeLinecap="round" />
+      ))}
+    </svg>
+  );
+}
+
+/* Detect if a description is a graph/diagram that we can render as SVG */
+function canRenderAsSVG(desc) {
+  const d = desc.toLowerCase();
+  return (
+    d.includes("graph") || d.includes("a-t") || d.includes("v-t") ||
+    d.includes("acceleration") || d.includes("velocity") ||
+    d.includes("displacement") || d.includes("increases") ||
+    d.includes("constant") || d.includes("linearly") ||
+    d.includes("parabola") || d.includes("curve") ||
+    d.includes("horizontal line") || d.includes("straight line") ||
+    d.includes("axis") || d.includes("plot")
+  );
+}
+
+function FigureBox({ desc, compact }) {
+  const showSVG = canRenderAsSVG(desc);
+  return (
+    <div style={{
+      border: `1.5px solid ${compact ? "#5c6bc0" : "#1a237e"}`,
+      borderRadius: compact ? 6 : 8,
+      overflow: "hidden",
+      background: "white",
+      display: "inline-block",
+      width: compact ? "auto" : "100%",
+    }}>
+      {/* Header */}
+      <div style={{
+        background: compact ? "#3949ab" : "#1a237e",
+        color: "white",
+        padding: compact ? "3px 8px" : "5px 12px",
+        fontSize: compact ? 9 : 11,
+        fontWeight: 700,
+        letterSpacing: 0.4,
+        display: "flex", alignItems: "center", gap: 4,
+      }}>
+        <span>📊</span> FIGURE / DIAGRAM
+      </div>
+      {/* Content */}
+      <div style={{ padding: compact ? "6px 8px" : "10px 14px", textAlign: "center" }}>
+        {showSVG ? (
+          <DiagramSVG desc={desc} compact={compact} />
+        ) : (
+          /* Non-graph diagrams: show description text */
+          <div style={{
+            fontSize: compact ? 11 : 13,
+            color: "#222",
+            lineHeight: 1.7,
+            fontFamily: "Georgia, serif",
+            textAlign: "left",
+            borderLeft: "3px solid #1a237e",
+            paddingLeft: 10,
+          }}>
+            {renderMath(desc)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function renderQuestionText(text, compact) {
   if (!text) return null;
   // Split text by [FIGURE: ...] tags
   const parts = text.split(/(\[FIGURE:[^\]]+\])/gi);
@@ -145,48 +375,8 @@ function renderQuestionText(text) {
     const figMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
     if (figMatch) {
       const desc = figMatch[1].trim();
-      return (
-        <div key={i} style={{
-          margin: "16px 0",
-          border: "2px solid #1a237e",
-          borderRadius: 8,
-          overflow: "hidden",
-          background: "#f8f9ff",
-        }}>
-          {/* Figure header */}
-          <div style={{
-            background: "#1a237e",
-            color: "white",
-            padding: "6px 14px",
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: 0.5,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}>
-            <span>📊</span> FIGURE / DIAGRAM
-          </div>
-          {/* Figure description — this IS the diagram content extracted by AI */}
-          <div style={{
-            padding: "14px 18px",
-            background: "white",
-          }}>
-            <div style={{
-              fontSize: 13.5,
-              color: "#222",
-              lineHeight: 1.8,
-              fontFamily: "Georgia, serif",
-              borderLeft: "3px solid #1a237e",
-              paddingLeft: 14,
-            }}>
-              {renderMath(desc)}
-            </div>
-          </div>
-        </div>
-      );
+      return <FigureBox key={i} desc={desc} compact={compact} />;
     }
-    // Regular text — apply math rendering
     const mathRendered = renderMath(part);
     if (!mathRendered) return null;
     return <span key={i}>{mathRendered}</span>;
@@ -2052,7 +2242,7 @@ function TestScreen({ test, student, onSubmit }) {
                         {["A","B","C","D"][oi]}
                       </div>
                       <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                        {renderQuestionText(opt)}
+                        {renderQuestionText(opt, true)}
                       </span>
                     </div>
                   );
@@ -2376,7 +2566,7 @@ function ResultsScreen({ test, student, submission, onBack }) {
                       background:String(r.correct)===String(oi)?"#c8e6c9":String(r.given)===String(oi)?"#ffcdd2":"white",
                       border:`1px solid ${String(r.correct)===String(oi)?"#81c784":"#e0e0e0"}`,
                       fontWeight:String(r.correct)===String(oi)?700:400 }}>
-                      {["A","B","C","D"][oi]}) {renderQuestionText(opt)}
+                      {["A","B","C","D"][oi]}) {renderQuestionText(opt, true)}
                       {String(r.correct)===String(oi)&&" ✅ Correct Answer"}
                       {String(r.given)===String(oi)&&String(r.given)!==String(r.correct)&&" ← Your Answer"}
                     </div>
