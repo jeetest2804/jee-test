@@ -564,7 +564,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
   const [paperFile, setPaperFile] = useState(null);
   const [keyFile, setKeyFile] = useState(null);
   const [status, setStatus] = useState("");
-  const [statusType, setStatusType] = useState("info"); // "info" | "error" | "success" | "warning"
+  const [statusType, setStatusType] = useState("info");
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [studentPasswords, setStudentPasswords] = useState([]);
@@ -573,6 +573,16 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
   const [savedDriveKey, setSavedDriveKey] = useState("");
   const [savedModel, setSavedModel] = useState("gemini-2.0-flash");
   const paperRef = useRef(); const keyRef = useRef();
+
+  // Section-based upload — each subject can have its own PDF
+  const DEFAULT_SECTIONS = [
+    { subject: "Physics",     file: null, mcq: 20, integer: 5, enabled: true },
+    { subject: "Chemistry",   file: null, mcq: 20, integer: 5, enabled: true },
+    { subject: "Mathematics", file: null, mcq: 20, integer: 5, enabled: true },
+  ];
+  const [sections, setSections] = useState(DEFAULT_SECTIONS);
+  const [uploadMode, setUploadMode] = useState("combined"); // "combined" | "separate"
+  const sectionRefs = useRef([null, null, null]);
 
   useEffect(() => {
     (async () => {
@@ -626,6 +636,20 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
 
   const setMsg = (msg, type = "info") => { setStatus(msg); setStatusType(type); };
 
+  const normalizeQs = (qs) => qs.map((q, idx) => {
+    let type = q.type;
+    if (!q.options || q.options.length === 0) type = "integer";
+    if (q.options && q.options.length > 0) type = "mcq";
+    return {
+      ...q,
+      id: q.id || (idx + 1),
+      type,
+      options: type === "mcq" ? (q.options || []) : [],
+      marks: Number(q.marks) || 4,
+      negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0),
+    };
+  });
+
   const createTest = async () => {
     if (!form.title.trim()) { setMsg("Enter a test title", "error"); return; }
 
@@ -637,41 +661,65 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
 
     try {
       if (form.mode === "upload") {
-        if (paperFile) {
+
+        // ── SEPARATE SECTION MODE ──
+        if (uploadMode === "separate") {
+          const enabledSections = sections.filter(s => s.enabled);
+          if (!enabledSections.some(s => s.file)) {
+            setMsg("❌ Please upload at least one section PDF.", "error");
+            setLoading(false); return;
+          }
+          const allQs = [];
+          let globalId = 1;
+          for (const sec of enabledSections) {
+            if (!sec.file) { setMsg(`⚠️ ${sec.subject} PDF not uploaded — skipping`, "warning"); continue; }
+            setMsg(`📄 Extracting ${sec.subject} questions... (${enabledSections.indexOf(sec)+1}/${enabledSections.length})`, "info");
+            try {
+              const b64 = await toBase64(sec.file);
+              const res = await parsePDF(b64, false, savedModel);
+              if (res?.questions?.length) {
+                const normalized = normalizeQs(res.questions).map(q => ({
+                  ...q,
+                  subject: sec.subject,
+                  id: globalId++,
+                }));
+                allQs.push(...normalized);
+                setMsg(`✅ ${sec.subject}: ${normalized.length} questions extracted`, "success");
+              } else {
+                setMsg(`⚠️ ${sec.subject}: No questions found in PDF`, "warning");
+              }
+            } catch (err) {
+              setMsg(`❌ ${sec.subject} failed: ${err.message}`, "error");
+              setLoading(false); return;
+            }
+          }
+          if (allQs.length === 0) {
+            setMsg("❌ No questions extracted from any section.", "error");
+            setLoading(false); return;
+          }
+          questions = allQs;
+          geminiUsed = true;
+          setMsg(`✅ All sections done! Total: ${questions.length} questions`, "success");
+
+        // ── COMBINED PDF MODE ──
+        } else if (paperFile) {
           setMsg("📄 Converting PDF to base64...", "info");
           const b64 = await toBase64(paperFile);
-          setMsg("🤖 Extracting questions in parallel (Physics + Chemistry + Maths simultaneously)... Please wait up to 90s", "info");
+          setMsg("🤖 Extracting all subjects in parallel... Please wait up to 90s", "info");
           try {
             const res = await parsePDF(b64, false, savedModel);
             if (res?.questions?.length) {
-              // Normalize questions — fix type mismatches from Gemini
-              questions = res.questions.map((q, idx) => {
-                let type = q.type;
-                // If options array is empty or missing, it must be integer type
-                if (!q.options || q.options.length === 0) type = "integer";
-                // If options has items, it must be mcq
-                if (q.options && q.options.length > 0) type = "mcq";
-                return {
-                  ...q,
-                  id: q.id || (idx + 1),
-                  type,
-                  options: type === "mcq" ? (q.options || []) : [],
-                  marks: Number(q.marks) || 4,
-                  negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0),
-                };
-              });
+              questions = normalizeQs(res.questions);
               geminiUsed = true;
               const warnMsg = res.warning ? ` ⚠️ Warning: ${res.warning}` : "";
-              setMsg(`✅ Extracted ${questions.length} questions across all subjects!${warnMsg}`, questions.length > 0 ? "success" : "warning");
+              setMsg(`✅ Extracted ${questions.length} questions!${warnMsg}`, "success");
             } else {
-              setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually. Check Render logs for details.", "error");
-              setLoading(false);
-              return;
+              setMsg("❌ Gemini returned 0 questions. The PDF may be scanned/image-based or formatted unusually.", "error");
+              setLoading(false); return;
             }
           } catch (geminiErr) {
             setMsg(`❌ Gemini failed: ${geminiErr.message}`, "error");
-            setLoading(false);
-            return;
+            setLoading(false); return;
           }
         } else {
           questions = DEMO_QUESTIONS;
@@ -951,9 +999,10 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
           <div style={{ background:"white", borderRadius:20, boxShadow:"0 2px 16px rgba(0,0,0,0.08)", padding:32 }}>
             <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>Create New Test</h2>
             <p style={{ color:"#888", fontSize:13, margin:"0 0 24px" }}>
-              🤖 Gemini AI will automatically extract questions from your PDF — no API key needed here, it's configured on the server.
+              🤖 Gemini AI extracts questions automatically — upload one combined PDF or separate PDFs per subject.
             </p>
 
+            {/* Basic info */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
               <div style={{ gridColumn:"1/-1" }}>
                 <Label>Test Title</Label>
@@ -969,19 +1018,20 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
               </div>
             </div>
 
-            <div style={{ marginTop:24 }}>
+            <div style={{ marginTop:20 }}>
               <Label>Schedule Date and Time (leave blank for immediate)</Label>
               <input type="datetime-local" value={form.scheduledAt} onChange={e=>setForm(f=>({...f,scheduledAt:e.target.value}))}
                 style={{ padding:"11px 14px", borderRadius:10, border:"1px solid #ddd", fontSize:14, outline:"none", fontFamily:"inherit", background:"#fafafa" }} />
             </div>
 
+            {/* Source mode tabs */}
             <div style={{ marginTop:24 }}>
               <Label>How to load the question paper?</Label>
               <div style={{ display:"flex", gap:10, marginTop:8, flexWrap:"wrap" }}>
-                {[["upload","📄 Upload PDF"],["drive","📁 Google Drive"],["demo","🎯 Use Demo Questions"]].map(([val,lbl])=>(
+                {[["upload","📄 Upload PDF"],["drive","📁 Google Drive"],["demo","🎯 Demo Questions"]].map(([val,lbl])=>(
                   <button key={val} onClick={()=>setForm(f=>({...f,mode:val}))}
-                    style={{ padding:"10px 20px", borderRadius:10, border:`2px solid ${form.mode===val?"#e8c97e":"#e0e0e0"}`,
-                      background:form.mode===val?"#fffde7":"white", color:form.mode===val?"#7c6a00":"#888",
+                    style={{ padding:"10px 20px", borderRadius:10, border:`2px solid ${form.mode===val?"#3949ab":"#e0e0e0"}`,
+                      background:form.mode===val?"#e8eaf6":"white", color:form.mode===val?"#1a237e":"#888",
                       fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
                     {lbl}
                   </button>
@@ -989,67 +1039,160 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
               </div>
             </div>
 
-            {/* Gemini info banner — no key input needed */}
-            {(form.mode === "upload" || form.mode === "drive") && (
-              <div style={{ marginTop:20, borderRadius:12, padding:16, border:"1px solid #c8e6c9", background:"#e8f5e9", display:"flex", alignItems:"flex-start", gap:12 }}>
-                <span style={{ fontSize:24 }}>🤖</span>
-                <div>
-                  <div style={{ fontWeight:700, color:"#2e7d32", fontSize:14 }}>AI is ready</div>
-                  <div style={{ fontSize:12, color:"#555", marginTop:3 }}>
-                    Questions will be extracted automatically using the Gemini API key configured on your server (Render environment variable). You don't need to enter anything here.
-                  </div>
-                </div>
-              </div>
-            )}
-
+            {/* ── UPLOAD MODE ── */}
             {form.mode === "upload" && (
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginTop:20 }}>
-                {[["Question Paper PDF", paperRef, paperFile, setPaperFile],["Answer Key PDF (optional)", keyRef, keyFile, setKeyFile]].map(([lbl,ref,file,setter])=>(
-                  <div key={lbl}>
-                    <Label>{lbl}</Label>
-                    <div onClick={()=>ref.current.click()} style={{ border:"2px dashed #d0d0d0", borderRadius:12, padding:20, textAlign:"center", cursor:"pointer", background:file?"#f0fdf4":"#fafafa" }}>
-                      <input type="file" accept=".pdf" ref={ref} style={{ display:"none" }} onChange={e=>setter(e.target.files[0])} />
-                      {file ? <div style={{ color:"#2e7d32", fontSize:13, fontWeight:600 }}>✅ {file.name}</div>
-                             : <div style={{ color:"#bbb", fontSize:13 }}>Click to upload PDF</div>}
+              <div style={{ marginTop:20 }}>
+
+                {/* Upload style toggle */}
+                <div style={{ display:"flex", gap:0, marginBottom:20, borderRadius:10, overflow:"hidden", border:"2px solid #e8eaf6" }}>
+                  {[["combined","📄 One Combined PDF","All subjects in a single PDF"],["separate","📚 Separate PDFs per Subject","Upload each subject individually"]].map(([val,lbl,sub])=>(
+                    <button key={val} onClick={()=>setUploadMode(val)}
+                      style={{ flex:1, padding:"12px 16px", border:"none", cursor:"pointer", fontFamily:"inherit", textAlign:"left", transition:"all 0.15s",
+                        background: uploadMode===val ? "#1a237e" : "white",
+                        color: uploadMode===val ? "white" : "#555",
+                        borderRight: val==="combined" ? "2px solid #e8eaf6" : "none" }}>
+                      <div style={{ fontWeight:800, fontSize:13 }}>{lbl}</div>
+                      <div style={{ fontSize:11, opacity:0.7, marginTop:2 }}>{sub}</div>
+                    </button>
+                  ))}
+                </div>
+
+                {/* ── COMBINED PDF ── */}
+                {uploadMode === "combined" && (
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                    {[["Question Paper PDF", paperRef, paperFile, setPaperFile],["Answer Key PDF (optional)", keyRef, keyFile, setKeyFile]].map(([lbl,ref,file,setter])=>(
+                      <div key={lbl}>
+                        <Label>{lbl}</Label>
+                        <div onClick={()=>ref.current.click()}
+                          style={{ border:`2px dashed ${file?"#43a047":"#c5cae9"}`, borderRadius:12, padding:"24px 16px", textAlign:"center", cursor:"pointer",
+                            background:file?"#f1f8e9":"#f8f9ff", transition:"all 0.15s" }}>
+                          <input type="file" accept=".pdf" ref={ref} style={{ display:"none" }} onChange={e=>setter(e.target.files[0])} />
+                          {file
+                            ? <><div style={{ fontSize:28, marginBottom:6 }}>✅</div><div style={{ color:"#2e7d32", fontSize:13, fontWeight:700 }}>{file.name}</div><div style={{ color:"#aaa", fontSize:11, marginTop:4 }}>Click to change</div></>
+                            : <><div style={{ fontSize:28, marginBottom:6 }}>📄</div><div style={{ color:"#7986cb", fontSize:13, fontWeight:600 }}>Click to upload PDF</div><div style={{ color:"#aaa", fontSize:11, marginTop:4 }}>or drag and drop</div></>
+                          }
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ── SEPARATE PDFS PER SUBJECT ── */}
+                {uploadMode === "separate" && (
+                  <div>
+                    <div style={{ marginBottom:14, padding:"10px 14px", background:"#e8eaf6", borderRadius:10, fontSize:12, color:"#3949ab", fontWeight:600 }}>
+                      💡 Upload a separate PDF for each subject. You can disable subjects you don't need.
+                    </div>
+
+                    {sections.map((sec, si) => {
+                      const colors = { Physics:{bg:"#e3f2fd",border:"#1565c0",icon:"⚛️",dark:"#1565c0"}, Chemistry:{bg:"#e8f5e9",border:"#2e7d32",icon:"🧪",dark:"#2e7d32"}, Mathematics:{bg:"#f3e5f5",border:"#6a1b9a",icon:"📐",dark:"#6a1b9a"} };
+                      const col = colors[sec.subject] || {bg:"#f5f5f5",border:"#555",icon:"📚",dark:"#555"};
+                      return (
+                        <div key={sec.subject} style={{ marginBottom:14, borderRadius:14, border:`2px solid ${sec.enabled?col.border:"#e0e0e0"}`, overflow:"hidden", opacity:sec.enabled?1:0.5, transition:"all 0.2s" }}>
+                          {/* Section header */}
+                          <div style={{ background:sec.enabled?col.bg:"#f5f5f5", padding:"12px 16px", display:"flex", alignItems:"center", gap:12 }}>
+                            <span style={{ fontSize:20 }}>{col.icon}</span>
+                            <div style={{ flex:1 }}>
+                              <div style={{ fontWeight:800, fontSize:15, color:sec.enabled?col.dark:"#aaa" }}>{sec.subject}</div>
+                              <div style={{ fontSize:11, color:"#888", marginTop:1 }}>
+                                {sec.mcq} MCQ + {sec.integer} Integer = {sec.mcq + sec.integer} questions
+                              </div>
+                            </div>
+                            {/* MCQ/Integer counts */}
+                            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                              <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                                <div style={{ fontSize:10, color:"#888", marginBottom:2 }}>MCQ</div>
+                                <input type="number" min="0" max="50" value={sec.mcq}
+                                  onChange={e=>setSections(p=>p.map((s,i)=>i===si?{...s,mcq:Number(e.target.value)}:s))}
+                                  style={{ width:50, padding:"4px 6px", borderRadius:6, border:"1px solid #ddd", fontSize:13, fontWeight:700, textAlign:"center", outline:"none" }} />
+                              </div>
+                              <div style={{ fontSize:16, color:"#bbb" }}>+</div>
+                              <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+                                <div style={{ fontSize:10, color:"#888", marginBottom:2 }}>Integer</div>
+                                <input type="number" min="0" max="20" value={sec.integer}
+                                  onChange={e=>setSections(p=>p.map((s,i)=>i===si?{...s,integer:Number(e.target.value)}:s))}
+                                  style={{ width:50, padding:"4px 6px", borderRadius:6, border:"1px solid #ddd", fontSize:13, fontWeight:700, textAlign:"center", outline:"none" }} />
+                              </div>
+                            </div>
+                            {/* Enable/Disable toggle */}
+                            <button onClick={()=>setSections(p=>p.map((s,i)=>i===si?{...s,enabled:!s.enabled}:s))}
+                              style={{ padding:"6px 14px", borderRadius:20, border:"none", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:"inherit",
+                                background: sec.enabled?col.dark:"#e0e0e0", color:sec.enabled?"white":"#888" }}>
+                              {sec.enabled?"✓ On":"Off"}
+                            </button>
+                          </div>
+
+                          {/* Upload area */}
+                          {sec.enabled && (
+                            <div style={{ padding:"12px 16px", background:"white" }}>
+                              <div onClick={()=>sectionRefs.current[si]?.click()}
+                                style={{ border:`2px dashed ${sec.file?col.border:"#ddd"}`, borderRadius:10, padding:"16px", textAlign:"center", cursor:"pointer",
+                                  background:sec.file?col.bg:"#fafafa", display:"flex", alignItems:"center", gap:12, transition:"all 0.15s" }}>
+                                <input type="file" accept=".pdf" ref={el=>sectionRefs.current[si]=el} style={{ display:"none" }}
+                                  onChange={e=>setSections(p=>p.map((s,i)=>i===si?{...s,file:e.target.files[0]}:s))} />
+                                <div style={{ fontSize:24 }}>{sec.file?"✅":"📄"}</div>
+                                <div style={{ textAlign:"left", flex:1 }}>
+                                  {sec.file
+                                    ? <><div style={{ color:col.dark, fontSize:13, fontWeight:700 }}>{sec.file.name}</div><div style={{ color:"#888", fontSize:11, marginTop:2 }}>Click to change</div></>
+                                    : <><div style={{ color:"#888", fontSize:13, fontWeight:600 }}>Click to upload {sec.subject} PDF</div><div style={{ color:"#bbb", fontSize:11, marginTop:2 }}>PDF containing only {sec.subject} questions</div></>
+                                  }
+                                </div>
+                                {sec.file && (
+                                  <button onClick={e=>{e.stopPropagation();setSections(p=>p.map((s,i)=>i===si?{...s,file:null}:s));}}
+                                    style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #ffcdd2", background:"#ffebee", color:"#c62828", cursor:"pointer", fontSize:11, fontWeight:700 }}>
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Answer key for separate mode */}
+                    <div style={{ marginTop:8 }}>
+                      <Label>Answer Key PDF (optional — applies to all sections)</Label>
+                      <div onClick={()=>keyRef.current.click()}
+                        style={{ border:`2px dashed ${keyFile?"#43a047":"#ddd"}`, borderRadius:10, padding:"14px 16px", textAlign:"center", cursor:"pointer", background:keyFile?"#f1f8e9":"#fafafa" }}>
+                        <input type="file" accept=".pdf" ref={keyRef} style={{ display:"none" }} onChange={e=>setKeyFile(e.target.files[0])} />
+                        {keyFile?<div style={{ color:"#2e7d32", fontSize:13, fontWeight:600 }}>✅ {keyFile.name}</div>:<div style={{ color:"#bbb", fontSize:13 }}>Click to upload Answer Key PDF</div>}
+                      </div>
                     </div>
                   </div>
-                ))}
+                )}
               </div>
             )}
 
+            {/* ── GOOGLE DRIVE MODE ── */}
             {form.mode === "drive" && (
               <div style={{ marginTop:20, background:"#f8f9ff", borderRadius:14, padding:20, border:"1px solid #e8eaf6" }}>
                 <div style={{ fontWeight:700, color:"#3949ab", marginBottom:14, fontSize:14 }}>Google Drive Settings</div>
                 <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
                   {form.driveApiKey ? (
                     <div style={{ background:"#e8f5e9", borderRadius:10, padding:"10px 14px", display:"flex", alignItems:"center", gap:8 }}>
-                      <span>✅</span>
-                      <div style={{ fontSize:13, color:"#2e7d32", fontWeight:700 }}>Drive API Key loaded from Settings</div>
+                      <span>✅</span><div style={{ fontSize:13, color:"#2e7d32", fontWeight:700 }}>Drive API Key loaded from Settings</div>
                     </div>
                   ) : (
                     <div>
                       <Label>Google Drive API Key</Label>
-                      <Input value={form.driveApiKey} onChange={v=>setForm(f=>({...f,driveApiKey:v}))} placeholder="AIzaSy... — or save permanently in ⚙️ Settings" />
+                      <Input value={form.driveApiKey} onChange={v=>setForm(f=>({...f,driveApiKey:v}))} placeholder="AIzaSy..." />
                     </div>
                   )}
-                  <div>
-                    <Label>Question Paper Google Drive File ID</Label>
-                    <Input value={form.drivePaperFileId} onChange={v=>setForm(f=>({...f,drivePaperFileId:v}))} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs..." />
-                  </div>
-                  <div>
-                    <Label>Answer Key Google Drive File ID (optional)</Label>
-                    <Input value={form.driveKeyFileId} onChange={v=>setForm(f=>({...f,driveKeyFileId:v}))} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs..." />
-                  </div>
+                  <div><Label>Question Paper File ID</Label><Input value={form.drivePaperFileId} onChange={v=>setForm(f=>({...f,drivePaperFileId:v}))} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs..." /></div>
+                  <div><Label>Answer Key File ID (optional)</Label><Input value={form.driveKeyFileId} onChange={v=>setForm(f=>({...f,driveKeyFileId:v}))} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs..." /></div>
                 </div>
               </div>
             )}
 
+            {/* ── DEMO MODE ── */}
             {form.mode === "demo" && (
               <div style={{ marginTop:16, background:"#e8f5e9", borderRadius:12, padding:16, fontSize:13, color:"#2e7d32", border:"1px solid #a5d6a7" }}>
                 Will use 9 sample JEE questions (3 Physics, 3 Chemistry, 3 Mathematics)
               </div>
             )}
 
+            {/* Status banner */}
             {status && (
               <div style={{ marginTop:16, padding:"12px 16px", borderRadius:10, fontSize:13, fontWeight:600, ...statusBannerStyle[statusType] }}>
                 {status}
@@ -1057,10 +1200,11 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
             )}
 
             <div style={{ display:"flex", gap:12, marginTop:24 }}>
-              <button onClick={()=>{ setView("dashboard"); setStatus(""); }} style={{ padding:"13px 24px", borderRadius:12, border:"2px solid #e0e0e0", background:"white", color:"#555", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
+              <button onClick={()=>{ setView("dashboard"); setStatus(""); setSections(DEFAULT_SECTIONS); setUploadMode("combined"); }}
+                style={{ padding:"13px 24px", borderRadius:12, border:"2px solid #e0e0e0", background:"white", color:"#555", fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
               <button onClick={createTest} disabled={loading}
-                style={{ flex:1, padding:"13px", borderRadius:12, border:"none", background:loading?"#ccc":"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, cursor:loading?"default":"pointer", fontSize:15, fontFamily:"inherit" }}>
-                {loading ? "Processing..." : "Create Test"}
+                style={{ flex:1, padding:"13px", borderRadius:12, border:"none", background:loading?"#ccc":"linear-gradient(135deg,#1a237e,#3949ab)", color:"white", fontWeight:800, cursor:loading?"default":"pointer", fontSize:15, fontFamily:"inherit" }}>
+                {loading ? "⏳ Processing..." : "🚀 Create Test"}
               </button>
             </div>
           </div>
