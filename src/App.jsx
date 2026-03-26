@@ -78,7 +78,7 @@ const DEMO_QUESTIONS = [
    AI PDF PARSER  — calls OUR backend /api/parse-pdf
    The Gemini API key never touches the browser.
 ───────────────────────────────────────────── */
-async function parsePDF(base64, isKey) {
+async function parsePDF(base64, isKey, model) {
   // 120 second timeout — large JEE PDFs can take a while
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
@@ -88,7 +88,7 @@ async function parsePDF(base64, isKey) {
     res = await fetch("/api/parse-pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base64, isKey }),
+      body: JSON.stringify({ base64, isKey, model }),
       signal: controller.signal,
     });
   } catch (err) {
@@ -381,6 +381,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [newSP, setNewSP] = useState({ name:"", username:"", password:"" });
   const [spMsg, setSpMsg] = useState("");
   const [savedDriveKey, setSavedDriveKey] = useState("");
+  const [savedModel, setSavedModel] = useState("gemini-2.0-flash-exp");
   const paperRef = useRef(); const keyRef = useRef();
 
   useEffect(() => {
@@ -390,6 +391,8 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
       const driveKey = await dbGet("drive-api-key") || "";
       setSavedDriveKey(driveKey);
       setForm(f => ({ ...f, driveApiKey: driveKey }));
+      const model = await dbGet("gemini-model") || "gemini-2.0-flash-exp";
+      setSavedModel(model);
     })();
   }, []);
 
@@ -449,7 +452,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
           const b64 = await toBase64(paperFile);
           setMsg("🤖 Sending to Gemini AI to extract questions... (may take up to 60s for large PDFs)", "info");
           try {
-            const res = await parsePDF(b64, false);
+            const res = await parsePDF(b64, false, savedModel);
             if (res?.questions?.length) {
               questions = res.questions;
               geminiUsed = true;
@@ -473,7 +476,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
           setMsg("🤖 Parsing answer key with Gemini...", "info");
           try {
             const b64 = await toBase64(keyFile);
-            const res = await parsePDF(b64, true);
+            const res = await parsePDF(b64, true, savedModel);
             if (res?.answers) {
               const map = {}; res.answers.forEach(a => map[a.q] = a.correct);
               questions = questions.map(q => ({ ...q, correct: map[q.id] ?? q.correct }));
@@ -493,7 +496,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         const paperB64 = await fetchDriveFile(form.drivePaperFileId, form.driveApiKey);
         setMsg("🤖 Sending to Gemini AI... (may take up to 60s for large PDFs)", "info");
         try {
-          const parsed = await parsePDF(paperB64, false);
+          const parsed = await parsePDF(paperB64, false, savedModel);
           if (parsed?.questions?.length) {
             questions = parsed.questions;
             geminiUsed = true;
@@ -510,7 +513,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         if (form.driveKeyFileId && geminiUsed) {
           try {
             const keyB64 = await fetchDriveFile(form.driveKeyFileId, form.driveApiKey);
-            const keyRes = await parsePDF(keyB64, true);
+            const keyRes = await parsePDF(keyB64, true, savedModel);
             if (keyRes?.answers) {
               const map = {}; keyRes.answers.forEach(a => map[a.q] = a.correct);
               questions = questions.map(q => ({ ...q, correct: map[q.id] ?? q.correct }));
@@ -646,11 +649,14 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
         )}
 
         {view === "settings" && (
-          <SettingsView savedDriveKey={savedDriveKey} onSave={async (driveKey) => {
-            await dbSet("drive-api-key", driveKey);
-            setSavedDriveKey(driveKey);
-            setForm(f => ({ ...f, driveApiKey: driveKey }));
-          }} />
+          <SettingsView savedDriveKey={savedDriveKey} savedModel={savedModel}
+            onSave={async (driveKey, model) => {
+              await dbSet("drive-api-key", driveKey);
+              setSavedDriveKey(driveKey);
+              setForm(f => ({ ...f, driveApiKey: driveKey }));
+              await dbSet("gemini-model", model);
+              setSavedModel(model);
+            }} />
         )}
 
         {view === "results" && (
@@ -840,44 +846,105 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
    SETTINGS VIEW  — only Drive key here now
    Gemini key is server-side (Render env var)
 ───────────────────────────────────────────── */
-function SettingsView({ savedDriveKey, onSave }) {
+function SettingsView({ savedDriveKey, savedModel, onSave }) {
   const [drive, setDrive] = useState(savedDriveKey || "");
+  const [model, setModel] = useState(savedModel || "gemini-2.0-flash-exp");
   const [msg, setMsg] = useState("");
   const [showDrive, setShowDrive] = useState(false);
 
   useEffect(() => { setDrive(savedDriveKey || ""); }, [savedDriveKey]);
+  useEffect(() => { setModel(savedModel || "gemini-2.0-flash-exp"); }, [savedModel]);
 
   const save = async () => {
-    await onSave(drive.trim());
-    setMsg("✅ Drive key saved!");
+    await onSave(drive.trim(), model);
+    setMsg("✅ Settings saved!");
     setTimeout(() => setMsg(""), 3000);
   };
 
   const maskKey = (k) => k.length > 8 ? k.slice(0,6) + "••••••••" + k.slice(-4) : k ? "••••••••" : "";
 
+  const MODELS = [
+    { id: "gemini-2.0-flash-exp",           label: "Gemini 2.0 Flash Exp",   limit: "1500 req/day", badge: "⚡ Recommended", badgeColor: "#2e7d32", badgeBg: "#e8f5e9", note: "Best free option — fast + capable" },
+    { id: "gemini-1.5-flash-latest",         label: "Gemini 1.5 Flash",        limit: "1500 req/day", badge: "✅ Stable",       badgeColor: "#1565c0", badgeBg: "#e3f2fd", note: "Very reliable, great for PDFs" },
+    { id: "gemini-2.0-flash",               label: "Gemini 2.0 Flash",        limit: "1500 req/day", badge: "🆕 New",          badgeColor: "#6a1b9a", badgeBg: "#f3e5f5", note: "Latest 2.0 model, very fast" },
+    { id: "gemini-1.5-flash-002",           label: "Gemini 1.5 Flash 002",    limit: "1500 req/day", badge: "🔄 Alternate",    badgeColor: "#00695c", badgeBg: "#e0f2f1", note: "Alternate 1.5 flash version" },
+    { id: "gemini-2.5-flash-preview-05-20", label: "Gemini 2.5 Flash",        limit: "500 req/day",  badge: "🧠 Smartest",     badgeColor: "#e65100", badgeBg: "#fff3e0", note: "Best accuracy, use for tough PDFs" },
+  ];
+
   return (
-    <div style={{ maxWidth:620 }}>
+    <div style={{ maxWidth:660 }}>
       <h2 style={{ margin:"0 0 6px", color:"#1a1a2e", fontSize:20 }}>⚙️ Settings</h2>
       <p style={{ color:"#888", fontSize:13, margin:"0 0 28px" }}>
-        The Gemini API key is configured securely on the server (Render environment variable) and is never exposed to the browser. Only the Google Drive API key is stored here.
+        Configure your AI model and API keys. Changes take effect immediately for the next test you create.
       </p>
 
-      {/* Gemini info card */}
-      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"2px solid #e8f5e9" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+      {/* ── Gemini Model Switcher ── */}
+      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"2px solid #e8eaf6" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18 }}>
           <span style={{ fontSize:22 }}>🤖</span>
           <div>
-            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>OpenRouter API Key</div>
+            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini AI Model</div>
+            <div style={{ fontSize:12, color:"#888" }}>Switch models if you hit quota limits</div>
+          </div>
+          <span style={{ marginLeft:"auto", background:"#e8eaf6", color:"#3949ab", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>
+            Active: {MODELS.find(m => m.id === model)?.label || model}
+          </span>
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {MODELS.map(m => (
+            <div
+              key={m.id}
+              onClick={() => setModel(m.id)}
+              style={{
+                padding:"14px 16px", borderRadius:12, cursor:"pointer", transition:"all 0.15s",
+                border: model === m.id ? "2px solid #3949ab" : "2px solid #e8eaf6",
+                background: model === m.id ? "#f0f4ff" : "#fafafa",
+                display:"flex", alignItems:"center", gap:14,
+              }}
+            >
+              {/* Radio dot */}
+              <div style={{
+                width:18, height:18, borderRadius:"50%", flexShrink:0,
+                border: model === m.id ? "5px solid #3949ab" : "2px solid #ccc",
+                background: "white", transition:"all 0.15s",
+              }} />
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:3 }}>
+                  <span style={{ fontWeight:700, fontSize:14, color:"#1a1a2e" }}>{m.label}</span>
+                  <span style={{ fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:20, background:m.badgeBg, color:m.badgeColor }}>{m.badge}</span>
+                </div>
+                <div style={{ fontSize:12, color:"#888" }}>{m.note}</div>
+              </div>
+              <div style={{ textAlign:"right", flexShrink:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"#555" }}>{m.limit}</div>
+                <div style={{ fontSize:10, color:"#bbb" }}>free tier</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop:14, padding:"10px 14px", borderRadius:10, background:"#fffde7", border:"1px solid #ffe082", fontSize:12, color:"#7c6a00" }}>
+          💡 <b>Quota tip:</b> If you see "quota exceeded", just switch to a different model above — each model has its own separate quota.
+        </div>
+      </div>
+
+      {/* ── Gemini API Key info ── */}
+      <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:16, border:"1px solid #e8f5e9" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:22 }}>🔑</span>
+          <div>
+            <div style={{ fontWeight:800, color:"#1a1a2e", fontSize:15 }}>Gemini API Key</div>
             <div style={{ fontSize:12, color:"#888" }}>Stored securely as a Render environment variable</div>
           </div>
           <span style={{ marginLeft:"auto", background:"#e8f5e9", color:"#2e7d32", fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20 }}>🔒 Server-side</span>
         </div>
         <div style={{ marginTop:12, background:"#f8f9ff", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#555" }}>
-          To change: go to <b>Render → Your Service → Environment</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>OPENROUTER_API_KEY</code> → Save → Redeploy.
+          To change: go to <b>Render → Your Service → Environment</b> → update <code style={{ background:"#e8eaf6", padding:"1px 6px", borderRadius:4 }}>GEMINI_API_KEY</code> → Save → Redeploy.
         </div>
       </div>
 
-      {/* Drive key */}
+      {/* ── Drive key ── */}
       <div style={{ background:"white", borderRadius:16, padding:24, boxShadow:"0 2px 10px rgba(0,0,0,0.06)", marginBottom:24, border:"1px solid #e3f2fd" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
           <span style={{ fontSize:22 }}>📁</span>
@@ -915,7 +982,7 @@ function SettingsView({ savedDriveKey, onSave }) {
 
       <button onClick={save}
         style={{ width:"100%", padding:"13px", borderRadius:12, border:"none", background:"linear-gradient(135deg,#1a1a2e,#3949ab)", color:"white", fontWeight:800, fontSize:15, cursor:"pointer", fontFamily:"Georgia, serif" }}>
-        💾 Save Drive Key
+        💾 Save Settings
       </button>
       {msg && (
         <div style={{ marginTop:14, padding:"12px 16px", borderRadius:10, background:"#e8f5e9", color:"#2e7d32", fontSize:13, fontWeight:600, border:"1px solid #a5d6a7" }}>
