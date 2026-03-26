@@ -140,7 +140,7 @@ app.post("/api/parse-pdf", async (req, res) => {
               { inline_data: { mime_type: "application/pdf", data: base64 } },
               { text: prompt },
             ]}],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+            generationConfig: { temperature: 0.1, maxOutputTokens: 16384 },
           }),
         }
       );
