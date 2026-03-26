@@ -12,6 +12,99 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+/* ══════════════════════════════════════════
+   API KEY ROTATION MANAGER
+   Reads GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
+   Automatically rotates to the next key on 429 (quota exceeded).
+   Falls back to GEMINI_API_KEY_POOL=key1,key2,key3 format too.
+══════════════════════════════════════════ */
+const apiKeyManager = (() => {
+  function loadKeys() {
+    const keys = [];
+
+    // Support GEMINI_API_KEY_POOL=key1,key2,key3 (comma-separated pool)
+    if (process.env.GEMINI_API_KEY_POOL) {
+      const poolKeys = process.env.GEMINI_API_KEY_POOL.split(",").map(k => k.trim()).filter(Boolean);
+      keys.push(...poolKeys);
+    }
+
+    // Support GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ... (numbered)
+    const numbered = [
+      process.env.GEMINI_API_KEY,
+      process.env.GEMINI_API_KEY_2,
+      process.env.GEMINI_API_KEY_3,
+      process.env.GEMINI_API_KEY_4,
+      process.env.GEMINI_API_KEY_5,
+    ].filter(Boolean);
+    for (const k of numbered) {
+      if (!keys.includes(k)) keys.push(k);
+    }
+
+    return keys;
+  }
+
+  const keys = loadKeys();
+  let currentIndex = 0;
+  // Track per-key quota exhaustion: key → timestamp when quota resets (or 0)
+  const quotaExhaustedUntil = {};
+
+  function getCurrent() {
+    if (keys.length === 0) return null;
+    // Find first key that is not quota-exhausted
+    for (let attempt = 0; attempt < keys.length; attempt++) {
+      const idx = (currentIndex + attempt) % keys.length;
+      const key = keys[idx];
+      const exhaustedUntil = quotaExhaustedUntil[key] || 0;
+      if (Date.now() >= exhaustedUntil) {
+        currentIndex = idx;
+        return key;
+      }
+    }
+    // All keys are quota-exhausted — return least-recently-exhausted key
+    const best = keys.reduce((a, b) =>
+      (quotaExhaustedUntil[a] || 0) < (quotaExhaustedUntil[b] || 0) ? a : b
+    );
+    console.warn("[KeyManager] All keys quota-exhausted. Using least-recently-exhausted key.");
+    return best;
+  }
+
+  function markQuotaExhausted(key) {
+    // Cool-down: assume quota resets after 60 seconds (typical for Gemini free tier per-minute limit)
+    const cooldownMs = 60 * 1000;
+    quotaExhaustedUntil[key] = Date.now() + cooldownMs;
+    console.warn(`[KeyManager] Key ...${key.slice(-6)} quota exhausted. Cooling down for ${cooldownMs / 1000}s.`);
+    // Advance to next key immediately
+    currentIndex = (currentIndex + 1) % keys.length;
+  }
+
+  function getNext() {
+    if (keys.length <= 1) return getCurrent();
+    currentIndex = (currentIndex + 1) % keys.length;
+    return getCurrent();
+  }
+
+  function getStatus() {
+    return {
+      totalKeys: keys.length,
+      currentKeyIndex: currentIndex,
+      keyStatuses: keys.map((k, i) => ({
+        index: i,
+        suffix: `...${k.slice(-6)}`,
+        isExhausted: Date.now() < (quotaExhaustedUntil[k] || 0),
+        exhaustedUntil: quotaExhaustedUntil[k] ? new Date(quotaExhaustedUntil[k]).toISOString() : null,
+      })),
+    };
+  }
+
+  if (keys.length === 0) {
+    console.warn("[KeyManager] ⚠️  No Gemini API keys found! Set GEMINI_API_KEY or GEMINI_API_KEY_POOL.");
+  } else {
+    console.log(`[KeyManager] ✅ Loaded ${keys.length} API key(s). Rotation enabled.`);
+  }
+
+  return { getCurrent, getNext, markQuotaExhausted, getStatus, get count() { return keys.length; } };
+})();
+
 app.use(cors());
 app.use(express.json({ limit: "100mb" }));
 app.use((req, res, next) => {
@@ -42,8 +135,9 @@ const CACHE_TTL = 60 * 60 * 1000;
 async function getAvailableModels(apiKey) {
   const now = Date.now();
   if (cachedModels && (now - cacheTime) < CACHE_TTL) return cachedModels;
+  const key = apiKey || apiKeyManager.getCurrent();
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const available = (data.models || [])
@@ -62,9 +156,10 @@ async function getAvailableModels(apiKey) {
   }
 }
 
-app.get("/api/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/api/health", (req, res) => res.json({ ok: true, ts: Date.now(), keyManager: apiKeyManager.getStatus() }));
+app.get("/api/key-status", (req, res) => res.json(apiKeyManager.getStatus()));
 app.get("/api/models", async (req, res) => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = apiKeyManager.getCurrent();
   if (!apiKey) return res.status(500).json({ error: "No API key" });
   res.json({ models: await getAvailableModels(apiKey) });
 });
@@ -169,7 +264,7 @@ app.post("/api/detect-figure-region", async (req, res) => {
   const { pageImageBase64, questionHint } = req.body;
   if (!pageImageBase64) return res.status(400).json({ error: "Missing pageImageBase64" });
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const geminiApiKey = apiKeyManager.getCurrent();
   if (!geminiApiKey) return res.json({ ok: true, region: null });
 
   const prompt = `This is a page from a JEE (Indian entrance exam) paper.${questionHint ? ` The question is about: "${questionHint}"` : ""}
@@ -197,52 +292,70 @@ Rules:
     const modelsToTry = fastModels.length > 0 ? fastModels : allModels.slice(0, 2);
 
     for (const model of modelsToTry) {
-      try {
-        const apiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { inline_data: { mime_type: "image/png", data: pageImageBase64 } },
-                  { text: prompt }
-                ]
-              }],
-              generationConfig: { temperature: 0, maxOutputTokens: 80 }
-            })
+      const maxKeyRotations = apiKeyManager.count;
+      let keyRotations = 0;
+      while (keyRotations <= maxKeyRotations) {
+        const activeKey = apiKeyManager.getCurrent();
+        try {
+          const apiRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${activeKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{
+                  parts: [
+                    { inline_data: { mime_type: "image/png", data: pageImageBase64 } },
+                    { text: prompt }
+                  ]
+                }],
+                generationConfig: { temperature: 0, maxOutputTokens: 80 }
+              })
+            }
+          );
+
+          if (!apiRes.ok) {
+            const errText = await apiRes.text();
+            if (apiRes.status === 429) {
+              console.warn(`[DetectRegion] 429 on key ...${activeKey.slice(-6)} for ${model}. Rotating.`);
+              apiKeyManager.markQuotaExhausted(activeKey);
+              keyRotations++;
+              continue;
+            }
+            throw new Error(`HTTP ${apiRes.status}: ${errText}`);
           }
-        );
-        const data = await apiRes.json();
-        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        const clean = raw.replace(/```json|```/g, "").trim();
-        const parsed = JSON.parse(clean);
 
-        // If Gemini explicitly says no figure
-        if (parsed.top === null || parsed.bottom === null) {
-          console.log(`[DetectRegion] ${model} → no figure detected`);
-          return res.json({ ok: true, region: null });
-        }
+          const data = await apiRes.json();
+          const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          const clean = raw.replace(/```json|```/g, "").trim();
+          const parsed = JSON.parse(clean);
 
-        if (parsed.top !== undefined && parsed.bottom !== undefined) {
-          const top    = Math.max(0,   Math.min(100, Number(parsed.top)));
-          const bottom = Math.min(100, Math.max(0,   Number(parsed.bottom)));
-          const left   = parsed.left  != null ? Math.max(0,   Math.min(100, Number(parsed.left)))  : 0;
-          const right  = parsed.right != null ? Math.min(100, Math.max(0,   Number(parsed.right))) : 100;
-
-          // Require a meaningful crop — reject if it's basically the full page
-          const heightCoverage = bottom - top;
-          const widthCoverage  = right  - left;
-          const isFullPage = heightCoverage > 90 && widthCoverage > 90;
-
-          if (bottom > top + 5 && right > left + 5 && !isFullPage) {
-            console.log(`[DetectRegion] ${model} → top:${top} bottom:${bottom} left:${left} right:${right}`);
-            return res.json({ ok: true, region: { top, bottom, left, right } });
+          // If Gemini explicitly says no figure
+          if (parsed.top === null || parsed.bottom === null) {
+            console.log(`[DetectRegion] ${model} → no figure detected`);
+            return res.json({ ok: true, region: null });
           }
+
+          if (parsed.top !== undefined && parsed.bottom !== undefined) {
+            const top    = Math.max(0,   Math.min(100, Number(parsed.top)));
+            const bottom = Math.min(100, Math.max(0,   Number(parsed.bottom)));
+            const left   = parsed.left  != null ? Math.max(0,   Math.min(100, Number(parsed.left)))  : 0;
+            const right  = parsed.right != null ? Math.min(100, Math.max(0,   Number(parsed.right))) : 100;
+
+            const heightCoverage = bottom - top;
+            const widthCoverage  = right  - left;
+            const isFullPage = heightCoverage > 90 && widthCoverage > 90;
+
+            if (bottom > top + 5 && right > left + 5 && !isFullPage) {
+              console.log(`[DetectRegion] ${model} → top:${top} bottom:${bottom} left:${left} right:${right}`);
+              return res.json({ ok: true, region: { top, bottom, left, right } });
+            }
+          }
+          break; // parsed OK but failed validation — try next model
+        } catch (e) {
+          console.error(`[DetectRegion] ${model} failed:`, e.message);
+          break;
         }
-      } catch (e) {
-        console.error(`[DetectRegion] ${model} failed:`, e.message);
       }
     }
   } catch (e) {
@@ -255,10 +368,13 @@ Rules:
 
 /* ══════════════════════════════════════════════════════════════════
    CORE: Call Gemini with a prompt + PDF base64
+   Automatically rotates API key on 429 (quota exceeded).
 ══════════════════════════════════════════════════════════════════ */
 async function callGemini(apiKey, model, base64, promptText) {
+  // Use provided key or get current from manager
+  const key = apiKey || apiKeyManager.getCurrent();
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -271,7 +387,13 @@ async function callGemini(apiKey, model, base64, promptText) {
       }),
     }
   );
-  if (!res.ok) { const b = await res.text(); const e = new Error(`HTTP ${res.status}: ${b}`); e.status = res.status; throw e; }
+  if (!res.ok) {
+    const b = await res.text();
+    const e = new Error(`HTTP ${res.status}: ${b}`);
+    e.status = res.status;
+    e.usedKey = key;
+    throw e;
+  }
   const data = await res.json();
   let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   if (!txt) throw new Error(`Empty response. finishReason=${data.candidates?.[0]?.finishReason}`);
@@ -283,15 +405,34 @@ async function callGemini(apiKey, model, base64, promptText) {
 
 async function callGeminiWithFallback(apiKey, models, base64, promptText, validate) {
   let lastError = null;
+  const maxKeyRotations = apiKeyManager.count;
+
   for (const model of models) {
-    try {
-      const parsed = await callGemini(apiKey, model, base64, promptText);
-      if (validate && !validate(parsed)) { lastError = `${model}: validation failed`; continue; }
-      console.log(`[Gemini] ✅ ${model} succeeded`);
-      return { parsed, model };
-    } catch (err) {
-      lastError = `${model}: ${err.message}`;
-      if (err.status === 404) cachedModels = null;
+    let keyRotations = 0;
+    while (keyRotations <= maxKeyRotations) {
+      const currentKey = apiKeyManager.getCurrent();
+      try {
+        const parsed = await callGemini(currentKey, model, base64, promptText);
+        if (validate && !validate(parsed)) { lastError = `${model}: validation failed`; break; }
+        console.log(`[Gemini] ✅ ${model} succeeded`);
+        return { parsed, model };
+      } catch (err) {
+        if (err.status === 429) {
+          // Quota exceeded — rotate to next key and retry same model
+          console.warn(`[Gemini] 429 on key ...${currentKey.slice(-6)} for model ${model}. Rotating key.`);
+          apiKeyManager.markQuotaExhausted(currentKey);
+          keyRotations++;
+          if (keyRotations <= maxKeyRotations) {
+            console.log(`[Gemini] Retrying ${model} with next key (rotation ${keyRotations}/${maxKeyRotations})`);
+            continue; // retry with new key
+          }
+          lastError = `${model}: all keys quota-exhausted`;
+        } else {
+          lastError = `${model}: ${err.message}`;
+          if (err.status === 404) cachedModels = null;
+        }
+        break;
+      }
     }
   }
   throw new Error(lastError || "All models failed");
@@ -376,7 +517,7 @@ Return ONLY valid JSON:
    /api/parse-pdf  — main endpoint
 ══════════════════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
-  const geminiApiKey = process.env.GEMINI_API_KEY;
+  const geminiApiKey = apiKeyManager.getCurrent();
   if (!geminiApiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
 
   const { base64, isKey, model: requestedModel } = req.body;
@@ -390,7 +531,7 @@ app.post("/api/parse-pdf", async (req, res) => {
   if (isKey) {
     try {
       const { parsed, model } = await callGeminiWithFallback(
-        geminiApiKey, models, base64, buildAnswerKeyPrompt(),
+        null, models, base64, buildAnswerKeyPrompt(),
         p => Array.isArray(p.answers) && p.answers.length > 0
       );
       return res.status(200).json({ ok: true, data: parsed, modelUsed: model });
@@ -405,7 +546,7 @@ app.post("/api/parse-pdf", async (req, res) => {
   const subjectResults = await Promise.allSettled(
     subjects.map(async (subject) => {
       const { parsed } = await callGeminiWithFallback(
-        geminiApiKey, models, base64,
+        null, models, base64,
         buildSubjectPrompt(subject, startIds[subject]),
         p => Array.isArray(p.questions) && p.questions.length > 0
       );
@@ -431,7 +572,7 @@ app.post("/api/parse-pdf", async (req, res) => {
 
   try {
     const { parsed, model } = await callGeminiWithFallback(
-      geminiApiKey, models, base64, buildFullPrompt(),
+      null, models, base64, buildFullPrompt(),
       p => Array.isArray(p.questions) && p.questions.length > 0
     );
     const numbered = parsed.questions.map((q, i) => ({ ...q, id: i + 1 }));

@@ -1,4 +1,85 @@
-# JEE TestForge — Improved with Real Diagram Images
+# JEE TestForge — with API Key Rotation
+
+## What Changed (v3)
+
+**New: API Key Rotation** — If one Gemini API key hits its quota limit (429), the server automatically switches to the next available key. Zero downtime, no manual intervention.
+
+**Also included from v2:** Diagrams show the **actual PDF page image** — no re-drawn figures, 100% accurate.
+
+---
+
+## API Key Rotation
+
+### How it works
+1. You set multiple Gemini API keys as environment variables
+2. The server uses the first available (non-exhausted) key for every request
+3. If a key returns HTTP 429 (quota exceeded), it's marked as cooling down for 60 seconds
+4. The next key in the pool is used immediately — same request, different key
+5. After the cooldown, the key re-enters rotation automatically
+
+### Setting up multiple keys
+**Option A — Numbered keys (recommended):**
+```
+GEMINI_API_KEY=AIza...key1
+GEMINI_API_KEY_2=AIza...key2
+GEMINI_API_KEY_3=AIza...key3
+GEMINI_API_KEY_4=AIza...key4
+GEMINI_API_KEY_5=AIza...key5
+```
+
+**Option B — Comma-separated pool:**
+```
+GEMINI_API_KEY_POOL=AIza...key1,AIza...key2,AIza...key3
+```
+
+Both formats can be combined — duplicates are removed automatically.
+
+### Monitor key status
+```
+GET /api/key-status
+```
+Returns which keys are active vs. cooling down.
+
+---
+
+## Deploy to Render.com
+
+1. Push this folder to a GitHub repo
+2. Go to [render.com](https://render.com) → New → Web Service → connect your repo
+3. Render will auto-detect `render.yaml` and configure everything
+4. In Render dashboard → Environment → add your keys:
+   - `GEMINI_API_KEY = AIza...key1`
+   - `GEMINI_API_KEY_2 = AIza...key2`
+   - *(add as many as you have)*
+5. Deploy!
+
+---
+
+## Local Development
+
+```bash
+npm install
+GEMINI_API_KEY=key1 GEMINI_API_KEY_2=key2 node server.js
+```
+
+Requires `poppler-utils` locally:
+- Ubuntu/Debian: `sudo apt-get install poppler-utils`
+- Mac: `brew install poppler`
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `GEMINI_API_KEY` | Primary Gemini API key (required) |
+| `GEMINI_API_KEY_2` | Second key for rotation (optional) |
+| `GEMINI_API_KEY_3` | Third key (optional) |
+| `GEMINI_API_KEY_4` | Fourth key (optional) |
+| `GEMINI_API_KEY_5` | Fifth key (optional) |
+| `GEMINI_API_KEY_POOL` | Comma-separated key pool (optional, alternative format) |
+| `PORT` | Server port (default 3000) |
+
 
 ## What Changed (v2)
 
