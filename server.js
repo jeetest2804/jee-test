@@ -68,12 +68,21 @@ Rules:
   // Build model list: requested model first, then fallbacks
   // Only models verified to work on free v1beta API
   const ALL_MODELS = [
-    "gemini-2.0-flash",           // FREE — 1500 req/day — most reliable
-    "gemini-2.0-flash-lite",      // FREE — 1500 req/day — faster/lighter
-    "gemini-1.5-flash",           // FREE — fallback (may be deprecated)
+    "gemini-2.0-flash",                // FREE — 1500 req/day — most reliable
+    "gemini-2.0-flash-lite",           // FREE — 1500 req/day — faster/lighter
+    "gemini-2.5-pro-preview-03-25",    // FREE tier — 50 req/day — most accurate
   ];
-  const primary = requestedModel && ALL_MODELS.includes(requestedModel)
-    ? requestedModel
+  // If client sends a deprecated model (e.g. saved in their browser from old version), remap it
+  const DEPRECATED_REMAP = {
+    "gemini-1.5-flash":    "gemini-2.0-flash",
+    "gemini-1.5-flash-8b": "gemini-2.0-flash-lite",
+    "gemini-1.5-pro":      "gemini-2.5-pro-preview-03-25",
+  };
+  const remapped = requestedModel && DEPRECATED_REMAP[requestedModel]
+    ? DEPRECATED_REMAP[requestedModel]
+    : requestedModel;
+  const primary = remapped && ALL_MODELS.includes(remapped)
+    ? remapped
     : "gemini-2.0-flash";
   const fallbacks = ALL_MODELS.filter(m => m !== primary);
   const models = [primary, ...fallbacks];
