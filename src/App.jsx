@@ -78,10 +78,10 @@ const DEMO_QUESTIONS = [
    AI PDF PARSER  — calls OUR backend /api/parse-pdf
    The Gemini API key never touches the browser.
 ───────────────────────────────────────────── */
-async function parsePDF(base64, isKey, model) {
-  // 120 second timeout — large JEE PDFs can take a while
+async function parsePDF(base64, isKey, model, attempt = 0) {
+  // 150 second timeout — large JEE PDFs can take a while
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000);
+  const timer = setTimeout(() => controller.abort(), 150_000);
 
   let res;
   try {
@@ -93,21 +93,42 @@ async function parsePDF(base64, isKey, model) {
     });
   } catch (err) {
     clearTimeout(timer);
-    if (err.name === "AbortError") throw new Error("Request timed out after 120s. Try a smaller PDF.");
+    if (err.name === "AbortError") throw new Error("Request timed out after 150s. Try a smaller PDF.");
     throw new Error("Network error — is the server running? " + err.message);
   }
   clearTimeout(timer);
+
+  // If server returned non-JSON (e.g. Render is cold-starting or crashed),
+  // retry once after a short delay before showing an error
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    if (attempt === 0) {
+      // Server may be waking up — wait 5s and retry once
+      await new Promise(r => setTimeout(r, 5000));
+      return parsePDF(base64, isKey, model, 1);
+    }
+    throw new Error(
+      `Server error (HTTP ${res.status}). ` +
+      (res.status === 502 ? "The server may still be waking up — wait 30 seconds and try again." :
+       res.status === 503 ? "Server timeout — your PDF may be too large." :
+       "Check Render logs for details.")
+    );
+  }
 
   let json;
   try {
     json = await res.json();
   } catch {
-    throw new Error(`Server returned non-JSON response (status ${res.status}). Check Render logs.`);
+    throw new Error(`Server returned invalid response (status ${res.status}). Check Render logs.`);
   }
 
   if (!res.ok) {
-    // Surface the full server error message
-    throw new Error(json.error || `Server error ${res.status}`);
+    const msg = json.error || `Server error ${res.status}`;
+    // Detect quota exhaustion and give helpful message
+    if (msg.includes("429") || msg.toLowerCase().includes("quota")) {
+      throw new Error("❌ Gemini quota exceeded for all models. Your free API key limit (1500/day) is used up. Wait until tomorrow or get a new API key from Google AI Studio.");
+    }
+    throw new Error(msg);
   }
 
   return json.data; // { questions: [...] }  or  { answers: [...] }
@@ -370,6 +391,23 @@ function LoginScreen({ onLogin, tests, directTestId }) {
 ───────────────────────────────────────────── */
 function AdminScreen({ user, tests, onSaveTests, onLogout }) {
   const [view, setView] = useState("dashboard");
+  const [serverReady, setServerReady] = useState(true);
+
+  // Check if server is awake on mount — show warning if cold-starting
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const r = await fetch("/api/health", { signal: AbortSignal.timeout(4000) });
+        setServerReady(r.ok);
+      } catch {
+        setServerReady(false);
+        // Retry after 8 seconds
+        setTimeout(check, 8000);
+      }
+    };
+    check();
+  }, []);
+
   const [form, setForm] = useState({ title:"", subject:"", scheduledAt:"", durationMins:180, mode:"upload", driveApiKey:"", drivePaperFileId:"", driveKeyFileId:"" });
   const [paperFile, setPaperFile] = useState(null);
   const [keyFile, setKeyFile] = useState(null);
@@ -569,6 +607,16 @@ function AdminScreen({ user, tests, onSaveTests, onLogout }) {
 
   return (
     <div style={{ minHeight:"100vh", background:"#f4f6fb", fontFamily:"Georgia, serif" }}>
+      {/* Server cold-start warning banner */}
+      {!serverReady && (
+        <div style={{ background:"#ff6f00", color:"white", padding:"10px 20px", textAlign:"center", fontSize:13, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+          <span style={{ fontSize:18 }}>⏳</span>
+          Server is waking up (free tier cold start) — please wait 30–60 seconds, then try again.
+          <button onClick={()=>window.location.reload()} style={{ marginLeft:12, padding:"4px 12px", borderRadius:6, border:"none", background:"white", color:"#ff6f00", fontWeight:800, cursor:"pointer", fontSize:12 }}>
+            Refresh
+          </button>
+        </div>
+      )}
       <div style={{ background:"linear-gradient(135deg,#1a1a2e,#16213e)", color:"white", padding:"0 24px", height:58, display:"flex", alignItems:"center", gap:16 }}>
         <span style={{ color:"#e8c97e", fontWeight:800, fontSize:17, letterSpacing:1 }}>🎯 TestForge</span>
         <span style={{ color:"rgba(255,255,255,0.4)", fontSize:12 }}>Admin Panel</span>
@@ -1196,6 +1244,16 @@ function StudentScreen({ user, tests, onStart, onLogout }) {
 
   return (
     <div style={{ minHeight:"100vh", background:"#f4f6fb", fontFamily:"Georgia, serif" }}>
+      {/* Server cold-start warning banner */}
+      {!serverReady && (
+        <div style={{ background:"#ff6f00", color:"white", padding:"10px 20px", textAlign:"center", fontSize:13, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+          <span style={{ fontSize:18 }}>⏳</span>
+          Server is waking up (free tier cold start) — please wait 30–60 seconds, then try again.
+          <button onClick={()=>window.location.reload()} style={{ marginLeft:12, padding:"4px 12px", borderRadius:6, border:"none", background:"white", color:"#ff6f00", fontWeight:800, cursor:"pointer", fontSize:12 }}>
+            Refresh
+          </button>
+        </div>
+      )}
       <div style={{ background:"linear-gradient(135deg,#1a1a2e,#16213e)", color:"white", padding:"0 24px", height:58, display:"flex", alignItems:"center", gap:16 }}>
         <span style={{ color:"#e8c97e", fontWeight:800, fontSize:17, letterSpacing:1 }}>🎯 TestForge</span>
         <span style={{ color:"rgba(255,255,255,0.4)", fontSize:12 }}>Student Portal</span>
