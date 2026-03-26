@@ -11,91 +11,209 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "100mb" }));
 
 app.use((req, res, next) => {
-  res.setTimeout(180_000, () => {
-    res.status(503).json({ error: "Server timeout — PDF may be too large. Try a smaller file." });
+  res.setTimeout(600_000, () => {
+    res.status(503).json({ error: "Server timeout." });
   });
   next();
 });
 
-/* ── Serve built frontend ── */
 const distPath = join(__dirname, "dist");
 app.use(express.static(distPath));
 
-/* ══════════════════════════════════════════════════════════════════
-   PERMANENT FIX: Dynamic model discovery
-
-   Instead of hardcoding model names (which break when Google
-   retires them), we call Google's /v1beta/models endpoint at startup
-   to discover which models are actually available RIGHT NOW.
-
-   Cached for 1 hour. Auto-invalidated on any 404 response.
-   This means the app AUTOMATICALLY adapts — no code changes needed.
-══════════════════════════════════════════════════════════════════ */
-
+/* ══════════════════════════════════════════
+   DYNAMIC MODEL DISCOVERY
+══════════════════════════════════════════ */
 const PREFERRED_ORDER = [
+  "gemini-2.5-flash-preview-04-17",
   "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
   "gemini-2.5-pro",
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite",
-  "gemini-2.0-flash-exp",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
 ];
 
 let cachedModels = null;
 let cacheTime = 0;
-const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL = 60 * 60 * 1000;
 
 async function getAvailableModels(apiKey) {
   const now = Date.now();
   if (cachedModels && (now - cacheTime) < CACHE_TTL) return cachedModels;
-
   try {
-    console.log("[Models] Fetching live model list from Google...");
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
-    );
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
     const data = await res.json();
     const available = (data.models || [])
       .filter(m => m.supportedGenerationMethods?.includes("generateContent"))
       .map(m => m.name.replace("models/", ""));
-
-    // Sort by preference, then append any new models Google adds
     const sorted = [
       ...PREFERRED_ORDER.filter(m => available.includes(m)),
       ...available.filter(m => !PREFERRED_ORDER.includes(m) && m.startsWith("gemini")),
     ];
-
     cachedModels = sorted.length > 0 ? sorted : PREFERRED_ORDER;
     cacheTime = now;
-    console.log(`[Models] Live list: ${cachedModels.join(", ")}`);
+    console.log(`[Models] List: ${cachedModels.slice(0, 3).join(", ")} ...`);
     return cachedModels;
   } catch (err) {
-    console.error("[Models] Could not fetch list:", err.message, "— using defaults");
+    console.error("[Models] Fetch failed:", err.message, "— using defaults");
     return PREFERRED_ORDER;
   }
 }
 
-/* ── /api/health — simple liveness check ── */
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, ts: Date.now() });
-});
-
-/* ── /api/models — frontend can query what's available ── */
+app.get("/api/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get("/api/models", async (req, res) => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "No API key" });
-  const models = await getAvailableModels(apiKey);
-  res.json({ models });
+  res.json({ models: await getAvailableModels(apiKey) });
 });
 
-/* ══════════════════════════════════════════════════════
-   /api/parse-pdf  — Gemini AI PDF parsing
-══════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   CORE: Call Gemini with a prompt + PDF base64
+   Returns parsed JSON or throws
+══════════════════════════════════════════════════════════════════ */
+async function callGemini(apiKey, model, base64, promptText) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: "application/pdf", data: base64 } },
+            { text: promptText },
+          ],
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 32768 },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    const err = new Error(`HTTP ${res.status}: ${body}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  const data = await res.json();
+  let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!txt) {
+    throw new Error(`Empty response. finishReason=${data.candidates?.[0]?.finishReason}`);
+  }
+
+  // Strip markdown fences
+  txt = txt.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  // Extract outermost JSON object
+  const start = txt.indexOf("{");
+  const end = txt.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("No JSON object found in response");
+
+  return JSON.parse(txt.slice(start, end + 1));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Try callGemini across all available models, return first success
+══════════════════════════════════════════════════════════════════ */
+async function callGeminiWithFallback(apiKey, models, base64, promptText, validate) {
+  let lastError = null;
+  for (const model of models) {
+    try {
+      console.log(`[Gemini] Trying ${model}...`);
+      const parsed = await callGemini(apiKey, model, base64, promptText);
+      if (validate && !validate(parsed)) {
+        lastError = `${model}: validation failed`;
+        console.error(`[Gemini] ${lastError}`);
+        continue;
+      }
+      console.log(`[Gemini] ✅ ${model} succeeded`);
+      return { parsed, model };
+    } catch (err) {
+      lastError = `${model}: ${err.message}`;
+      console.error(`[Gemini] ${lastError}`);
+      if (err.status === 404) cachedModels = null; // Invalidate cache
+      continue;
+    }
+  }
+  throw new Error(lastError || "All models failed");
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   BUILD PROMPTS
+══════════════════════════════════════════════════════════════════ */
+function buildSubjectPrompt(subject, startId) {
+  return `You are extracting ONLY the ${subject} questions from this JEE exam PDF.
+
+Focus exclusively on ${subject} questions. Ignore Physics, Chemistry, and Mathematics questions that are NOT ${subject}.
+Question IDs should start from ${startId} and be sequential.
+
+This PDF may contain diagrams, graphs, figures, and mathematical expressions.
+For questions with diagrams/figures/graphs: include [FIGURE: detailed visual description] in the text.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{"questions":[
+{"id":${startId},"subject":"${subject}","type":"mcq","text":"full question text. [FIGURE: description if any diagram exists]","options":["A text","B text","C text","D text"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
+{"id":${startId+1},"subject":"${subject}","type":"integer","text":"full question text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
+]}
+
+RULES:
+- subject: EXACTLY "${subject}"
+- type: "mcq" for 4-option, "integer" for numeric answer
+- options: 4 strings for MCQ with NO "A)" "B)" prefixes, empty [] for integer
+- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual number for integer
+- marks: 4, negative: -1 for MCQ / 0 for integer
+- hasFigure: true if question has a diagram/graph/figure
+- [FIGURE: ...]: thorough description so student can understand without seeing original
+- Extract EVERY ${subject} question — do not skip any
+- Output ONLY the JSON object`;
+}
+
+function buildAnswerKeyPrompt() {
+  return `Extract the complete answer key from this JEE PDF.
+Return ONLY valid JSON — no markdown:
+{"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
+- q = question number
+- For MCQ: correct = 0-based index (0=A, 1=B, 2=C, 3=D)
+- For integer: correct = the numeric answer
+- Include ALL questions. Output ONLY JSON.`;
+}
+
+function buildFullPrompt() {
+  return `You are extracting ALL questions from a JEE exam PDF. Extract EVERY question — do not stop early.
+A full JEE paper has 75-90 questions across Physics, Chemistry, Mathematics.
+
+This PDF may contain diagrams, graphs, figures.
+For questions with diagrams: include [FIGURE: detailed visual description] in the text.
+
+Return ONLY valid JSON:
+{"questions":[
+{"id":1,"subject":"Physics","type":"mcq","text":"full text. [FIGURE: desc if diagram]","options":["A","B","C","D"],"correct":2,"marks":4,"negative":-1,"hasFigure":false},
+{"id":2,"subject":"Physics","type":"integer","text":"full text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false}
+]}
+RULES:
+- subject: EXACTLY "Physics", "Chemistry", or "Mathematics"
+- type: "mcq" or "integer"
+- options: 4 strings for MCQ (no "A)" prefixes), [] for integer
+- correct: 0-based for MCQ, actual number for integer
+- Extract ALL questions. Output ONLY JSON.`;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   /api/parse-pdf  — main endpoint
+   
+   Strategy for questions (isKey=false):
+   1. Try PARALLEL extraction — send 3 simultaneous requests for
+      Physics, Chemistry, Maths separately (each ~25 questions)
+   2. Merge results, re-number IDs sequentially
+   3. If parallel fails, fall back to single full-paper extraction
+   
+   For answer key (isKey=true): single call as before
+══════════════════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
@@ -107,107 +225,95 @@ app.post("/api/parse-pdf", async (req, res) => {
   const { base64, isKey, model: requestedModel } = req.body;
   if (!base64) return res.status(400).json({ error: "Missing base64 PDF data" });
 
-  const prompt = isKey
-    ? `Extract the answer key from this JEE PDF. Return ONLY valid JSON, no markdown, no extra text.
-FORMAT: {"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
-RULES:
-- q = question number
-- For MCQ: correct = 0-based index (0=A, 1=B, 2=C, 3=D)
-- For integer: correct = the numeric answer
-- Include every question. Output ONLY JSON.`
-    : `You are extracting ALL questions from a JEE exam PDF. Extract EVERY question — do not stop early.
-A full JEE paper has 75-90 questions across Physics, Chemistry and Mathematics.
-
-Return ONLY a valid JSON object — no markdown, no explanation:
-{"questions":[
-{"id":1,"subject":"Physics","type":"mcq","text":"full question text","options":["option A text","option B text","option C text","option D text"],"correct":2,"marks":4,"negative":-1},
-{"id":2,"subject":"Physics","type":"integer","text":"full question text","options":[],"correct":5,"marks":4,"negative":0}
-]}
-
-FIELD RULES:
-- id: question number starting from 1, sequential
-- subject: EXACTLY "Physics", "Chemistry", or "Mathematics" — nothing else
-- type: "mcq" for 4-option questions, "integer" for numeric answer questions
-- text: the complete full question text
-- options: 4 strings for MCQ (NO "A)" "B)" prefixes), empty array [] for integer
-- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), actual number for integer
-- marks: 4 (usual), negative: -1 for MCQ, 0 for integer
-
-IMPORTANT: Extract ALL questions. Do not skip any. Output ONLY the JSON.`;
-
-  // Get live model list, try requested model first
   const allModels = await getAvailableModels(geminiApiKey);
   const models = requestedModel && allModels.includes(requestedModel)
     ? [requestedModel, ...allModels.filter(m => m !== requestedModel)]
     : allModels;
 
-  let lastError = null;
-
-  for (const model of models) {
+  /* ── ANSWER KEY: single call ── */
+  if (isKey) {
     try {
-      console.log(`[Gemini] Trying: ${model}`);
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [
-              { inline_data: { mime_type: "application/pdf", data: base64 } },
-              { text: prompt },
-            ]}],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 32768 },
-          }),
-        }
+      const { parsed, model } = await callGeminiWithFallback(
+        geminiApiKey, models, base64,
+        buildAnswerKeyPrompt(),
+        p => Array.isArray(p.answers) && p.answers.length > 0
       );
-
-      if (!geminiRes.ok) {
-        const errBody = await geminiRes.text();
-        lastError = `Gemini ${model} HTTP ${geminiRes.status}: ${errBody}`;
-        console.error(`[Gemini] ${lastError}`);
-        if (geminiRes.status === 404) {
-          console.log(`[Models] ${model} is gone — invalidating cache`);
-          cachedModels = null; // Force re-discovery on next request
-        }
-        continue;
-      }
-
-      const data = await geminiRes.json();
-      let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-      if (!txt) {
-        lastError = `${model} returned empty. finishReason=${data.candidates?.[0]?.finishReason}`;
-        console.error(`[Gemini] ${lastError}`);
-        continue;
-      }
-
-      txt = txt.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
-      const start = txt.indexOf("{");
-      const end = txt.lastIndexOf("}");
-      if (start === -1 || end === -1) {
-        lastError = `${model}: no JSON found`;
-        continue;
-      }
-
-      let parsed;
-      try { parsed = JSON.parse(txt.slice(start, end + 1)); }
-      catch (e) { lastError = `${model}: JSON parse failed — ${e.message}`; continue; }
-
-      if (!isKey && (!parsed.questions?.length)) { lastError = `${model}: questions empty`; continue; }
-      if (isKey && (!parsed.answers?.length)) { lastError = `${model}: answers empty`; continue; }
-
-      const count = isKey ? parsed.answers.length : parsed.questions.length;
-      console.log(`[Gemini] ✅ ${model} succeeded! Items: ${count}`);
+      console.log(`[AnswerKey] ✅ Extracted ${parsed.answers.length} answers`);
       return res.status(200).json({ ok: true, data: parsed, modelUsed: model });
-
     } catch (err) {
-      lastError = `Fetch error for ${model}: ${err.message}`;
-      console.error(`[Gemini] ${lastError}`);
-      continue;
+      return res.status(502).json({ error: err.message });
     }
   }
 
-  return res.status(502).json({ error: lastError || "All models failed." });
+  /* ── QUESTIONS: parallel subject extraction ── */
+  const subjects = ["Physics", "Chemistry", "Mathematics"];
+  // Starting IDs: Physics 1-30, Chemistry 31-60, Maths 61-90
+  const startIds = { Physics: 1, Chemistry: 31, Mathematics: 61 };
+
+  console.log(`[Questions] Starting parallel extraction for all 3 subjects...`);
+
+  // Run all 3 subjects simultaneously
+  const subjectResults = await Promise.allSettled(
+    subjects.map(async (subject) => {
+      const prompt = buildSubjectPrompt(subject, startIds[subject]);
+      const { parsed } = await callGeminiWithFallback(
+        geminiApiKey, models, base64, prompt,
+        p => Array.isArray(p.questions) && p.questions.length > 0
+      );
+      const qs = parsed.questions.map(q => ({ ...q, subject }));
+      console.log(`[Questions] ${subject}: extracted ${qs.length} questions`);
+      return qs;
+    })
+  );
+
+  // Collect successful results
+  const allQuestions = [];
+  const failures = [];
+
+  subjectResults.forEach((result, i) => {
+    if (result.status === "fulfilled") {
+      allQuestions.push(...result.value);
+    } else {
+      failures.push(subjects[i]);
+      console.error(`[Questions] ${subjects[i]} failed:`, result.reason?.message);
+    }
+  });
+
+  // If parallel worked for at least some subjects
+  if (allQuestions.length > 0) {
+    // Sort by id and re-number sequentially
+    allQuestions.sort((a, b) => (a.id || 0) - (b.id || 0));
+    const numbered = allQuestions.map((q, i) => ({ ...q, id: i + 1 }));
+
+    console.log(`[Questions] ✅ Parallel extraction done: ${numbered.length} total questions`);
+    if (failures.length > 0) {
+      console.warn(`[Questions] ⚠️ Failed subjects: ${failures.join(", ")}`);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      data: { questions: numbered },
+      modelUsed: "parallel",
+      warning: failures.length > 0
+        ? `Could not extract ${failures.join(", ")} questions. Try again.`
+        : null,
+    });
+  }
+
+  // All parallel calls failed — fall back to single full-paper extraction
+  console.log("[Questions] Parallel failed, trying single full-paper extraction...");
+  try {
+    const { parsed, model } = await callGeminiWithFallback(
+      geminiApiKey, models, base64,
+      buildFullPrompt(),
+      p => Array.isArray(p.questions) && p.questions.length > 0
+    );
+    const numbered = parsed.questions.map((q, i) => ({ ...q, id: i + 1 }));
+    console.log(`[Questions] ✅ Fallback extraction: ${numbered.length} questions`);
+    return res.status(200).json({ ok: true, data: { questions: numbered }, modelUsed: model });
+  } catch (err) {
+    return res.status(502).json({ error: err.message });
+  }
 });
 
 /* ── Catch-all: serve React app ── */
@@ -218,7 +324,6 @@ app.get("*", (req, res) => {
     : res.status(404).send("App not built yet. Run: npm run build");
 });
 
-// Bind 0.0.0.0 — required for Render to detect the open port
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ TestForge server running on port ${PORT}`);
   if (process.env.GEMINI_API_KEY) {
