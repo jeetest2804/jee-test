@@ -134,222 +134,295 @@ function renderMath(text) {
 
 /* ─────────────────────────────────────────────
    FIGURE / DIAGRAM RENDERER
-   Parses [FIGURE: description] tags and renders actual SVG diagrams
+   Converts [FIGURE: description] → actual SVG diagrams
 ───────────────────────────────────────────── */
 
-/* ── Smart diagram builder: converts text descriptions → SVG paths ── */
-function DiagramSVG({ desc, compact }) {
+/* ══════════════════════════════════════════
+   GRAPH SVG — for a-t, v-t, F-t style graphs
+══════════════════════════════════════════ */
+function GraphSVG({ desc, compact }) {
   const d = desc.toLowerCase();
-  const W = compact ? 160 : 220;
-  const H = compact ? 120 : 160;
-  const ox = 32, oy = H - 24; // origin x,y
-  const gw = W - ox - 12;     // graph width
-  const gh = oy - 12;          // graph height
+  const W = compact ? 170 : 260;
+  const H = compact ? 130 : 190;
+  const ox = compact ? 28 : 38;
+  const oy = H - (compact ? 22 : 28);
+  const gw = W - ox - (compact ? 10 : 16);
+  const gh = oy - (compact ? 14 : 18);
+  const lw = compact ? 1.8 : 2.2;
+  const fs = compact ? 9 : 12;
 
-  // Detect axis labels from description
-  const xLabel = d.includes("t)") || d.includes("time") ? "t" :
-                 d.includes("x)") ? "x" : d.includes("v)") ? "v" : "x";
-  const yLabel = d.includes("a-t") || d.includes("acceleration") ? "a" :
-                 d.includes("v-t") || d.includes("velocity") ? "v" :
-                 d.includes("displacement") ? "s" :
+  const xLabel = d.includes("time") || d.match(/[^a-z]t[^a-z]/) ? "t" :
+                 d.includes("displacement") || d.match(/[^a-z]x[^a-z]/) ? "x" : "t";
+  const yLabel = d.includes("acceleration") || d.includes("a-t") ? "a" :
+                 d.includes("velocity") || d.includes("v-t") ? "v" :
+                 d.includes("force") || d.includes("f-t") ? "F" :
                  d.includes("current") ? "I" :
-                 d.includes("force") ? "F" :
-                 d.includes("pressure") ? "P" : "y";
+                 d.includes("pressure") ? "P" :
+                 d.includes("displacement") ? "s" : "y";
 
-  // Build path segments from description keywords
-  const segments = [];
+  const px = f => ox + f * gw;
+  const py = f => oy - f * gh;
 
-  // Helper to add a segment
-  const seg = (x1, y1, x2, y2) => segments.push({ x1, y1, x2, y2 });
+  // ── Detect graph shape from description ──
+  const hasZeroRegion = d.includes("remains at 0") || d.includes("remains 0") ||
+    d.includes("stays at zero") || d.includes("a=0 for some time") ||
+    d.includes("zero for") || d.includes("at zero for") || d.includes("remains a=0");
+  const zeroEnd = hasZeroRegion ? 0.32 : 0;
 
-  // Coordinate helpers (% of graph area → SVG px)
-  const px = (frac) => ox + frac * gw;
-  const py = (frac) => oy - frac * gh; // frac=0 → bottom, frac=1 → top
+  const hasCurve    = d.includes("parabola") || d.includes("concave up") ||
+                      d.includes("curves upward") || d.includes("curve");
+  const hasLinear   = d.includes("increases linearly") || d.includes("linearly with time") ||
+                      d.includes("linear increase") || d.includes("increases linear");
+  const hasConstant = d.includes("constant") && !d.includes("not constant");
+  const hasJump     = d.includes("jump") || d.includes("abrupt") || d.includes("sudden");
+  const hasDrop     = d.includes("drop") || d.includes("fall") || d.includes("goes to zero") ||
+                      d.includes("back to zero") || d.includes("decreases to zero");
+  const hasLinearAgain = d.includes("then increases linearly again") || d.includes("increases linearly again");
 
-  // ── Pattern detection ──
-  const isAT = yLabel === "a";
-  const isVT = yLabel === "v";
+  // pick the jump height (mid-level)
+  const jumpH = 0.55;
+  const jumpH2 = 0.30; // lower level after drop
 
-  // "remains 0 / stays at zero" for initial period
-  const startsZero = d.includes("remains at 0") || d.includes("remains 0") ||
-                     d.includes("starts at a=0") || d.includes("starts at 0") ||
-                     d.includes("a=0, t=0") || d.includes("remains a=0");
-  const zeroEnd = startsZero ? 0.35 : 0;
+  let lines = [];    // {x1,y1,x2,y2}
+  let curves = [];   // SVG path strings
 
-  // "increases linearly" / "linear increase"
-  const linearUp = d.includes("increases linearly") || d.includes("linear increase") ||
-                   d.includes("linearly with time") || d.includes("increases linear");
-  // "increases with a curve / parabola / concave"
-  const curveUp = d.includes("parabola") || d.includes("concave up") ||
-                  d.includes("curves upward") || d.includes("curve");
-  // "constant" (horizontal plateau)
-  const constant = d.includes("constant") && !d.includes("not constant");
-  // "jumps / abruptly jumps / suddenly" to a value
-  const jumps = d.includes("jump") || d.includes("abrupt") || d.includes("sudden");
-  // "drops / decreases / falls"
-  const drops = d.includes("drop") || d.includes("decrease") || d.includes("fall") ||
-                d.includes("goes to zero") || d.includes("back to zero");
-  // "then increases linearly again" after a drop
-  const linearAgain = d.includes("then increases linearly again") ||
-                      d.includes("increases linearly again");
-
-  // Determine which graph pattern to draw
-  // Pattern A: zero → curve up (parabola-like)
-  // Pattern B: zero → jump → linear up (or zero → jump → constant → linear)
-  // Pattern C: zero → jump → linear up (simpler)
-  // Pattern D: zero → jump → constant → drop to zero (step then flat)
-  // Pattern E: zero → jump → constant (flat at top)
-  // Pattern F: purely linear from origin
-  // Pattern G: linear then drops to lower constant then linear again
-
-  let pathD = "";
-  let extraPaths = []; // for curves needing bezier
-
-  if (startsZero && curveUp) {
-    // Pattern A: flat then parabola curve
-    // flat from 0 to zeroEnd
-    seg(px(0), py(0), px(zeroEnd), py(0));
-    // bezier curve from zeroEnd to right edge going up
-    const cx1 = px(zeroEnd + 0.2), cy1 = py(0.05);
-    const cx2 = px(0.85), cy2 = py(0.6);
-    const ex = px(1), ey = py(0.95);
-    extraPaths.push(`M ${px(zeroEnd)} ${py(0)} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`);
-
-  } else if (startsZero && jumps && constant && drops && linearAgain) {
-    // Pattern G (like Graph B in original): zero → jump → linear → drop → linear
-    seg(px(0), py(0), px(0.3), py(0));        // flat zero
-    seg(px(0.3), py(0.42), px(0.55), py(0.42)); // jump to mid, then flat briefly
-    seg(px(0.3), py(0), px(0.3), py(0.42));    // vertical jump
-    seg(px(0.55), py(0.42), px(0.56), py(0.2)); // drop to lower
-    seg(px(0.56), py(0.2), px(1.0), py(0.78)); // then increases linearly
-
-  } else if (startsZero && jumps && linearUp && !constant) {
-    // Pattern C: zero → jump → linearly increasing
-    seg(px(0), py(0), px(zeroEnd), py(0));
-    seg(px(zeroEnd), py(0), px(zeroEnd), py(0.28)); // vertical jump
-    seg(px(zeroEnd), py(0.28), px(1.0), py(0.95));  // linear up
-
-  } else if (startsZero && jumps && constant && drops) {
-    // Pattern D: zero → jump → constant plateau → drop to zero
-    seg(px(0), py(0), px(0.3), py(0));
-    seg(px(0.3), py(0), px(0.3), py(0.6));      // vertical jump
-    seg(px(0.3), py(0.6), px(0.68), py(0.6));   // flat
-    seg(px(0.68), py(0.6), px(0.68), py(0));    // drop to zero
-    seg(px(0.68), py(0), px(1.0), py(0));        // stays zero
-
-  } else if (startsZero && jumps && constant) {
-    // Pattern E: zero → jump → flat constant
-    seg(px(0), py(0), px(zeroEnd), py(0));
-    seg(px(zeroEnd), py(0), px(zeroEnd), py(0.65)); // vertical jump
-    seg(px(zeroEnd), py(0.65), px(1.0), py(0.65));  // flat at top
-
-  } else if (startsZero && linearUp) {
-    // Pattern C simple: flat zero then linear
-    seg(px(0), py(0), px(zeroEnd), py(0));
-    seg(px(zeroEnd), py(0), px(1.0), py(0.95));
-
-  } else if (linearUp && !startsZero) {
-    // Straight line from origin
-    seg(px(0), py(0), px(1.0), py(0.95));
-
-  } else if (constant && !startsZero && !drops) {
-    // Horizontal line (constant value)
-    seg(px(0), py(0.6), px(1.0), py(0.6));
-
+  if (hasZeroRegion && hasCurve) {
+    // Graph A type: zero then parabola curving up
+    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
+    curves.push(`M ${px(zeroEnd)} ${py(0)} C ${px(zeroEnd+0.18)} ${py(0.04)}, ${px(0.82)} ${py(0.55)}, ${px(1.0)} ${py(0.95)}`);
+  } else if (hasZeroRegion && hasJump && hasLinearAgain && hasDrop) {
+    // Graph B type: zero → jump → linear → drop → linear again
+    lines.push({ x1:px(0), y1:py(0), x2:px(0.28), y2:py(0) });
+    lines.push({ x1:px(0.28), y1:py(0), x2:px(0.28), y2:py(jumpH) }); // jump up
+    lines.push({ x1:px(0.28), y1:py(jumpH), x2:px(0.50), y2:py(jumpH) }); // brief flat
+    lines.push({ x1:px(0.50), y1:py(jumpH), x2:px(0.51), y2:py(jumpH2) }); // drop down
+    lines.push({ x1:px(0.51), y1:py(jumpH2), x2:px(1.0), y2:py(0.90) }); // linear up
+  } else if (hasZeroRegion && hasJump && hasLinear && !hasConstant) {
+    // Graph C type: zero → jump → linear increasing
+    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
+    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(zeroEnd), y2:py(jumpH) });
+    lines.push({ x1:px(zeroEnd), y1:py(jumpH), x2:px(1.0), y2:py(0.95) });
+  } else if (hasZeroRegion && hasJump && hasConstant && hasDrop) {
+    // Graph D type: zero → jump → constant plateau → drop to zero (stays zero)
+    lines.push({ x1:px(0), y1:py(0), x2:px(0.28), y2:py(0) });
+    lines.push({ x1:px(0.28), y1:py(0), x2:px(0.28), y2:py(jumpH) });
+    lines.push({ x1:px(0.28), y1:py(jumpH), x2:px(0.68), y2:py(jumpH) });
+    lines.push({ x1:px(0.68), y1:py(jumpH), x2:px(0.68), y2:py(0) });
+    lines.push({ x1:px(0.68), y1:py(0), x2:px(1.0), y2:py(0) });
+  } else if (hasZeroRegion && hasJump && hasConstant) {
+    // zero → jump → flat constant (stays at top)
+    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
+    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(zeroEnd), y2:py(jumpH) });
+    lines.push({ x1:px(zeroEnd), y1:py(jumpH), x2:px(1.0), y2:py(jumpH) });
+  } else if (hasZeroRegion && hasLinear) {
+    // zero → linear (no jump)
+    lines.push({ x1:px(0), y1:py(0), x2:px(zeroEnd), y2:py(0) });
+    lines.push({ x1:px(zeroEnd), y1:py(0), x2:px(1.0), y2:py(0.92) });
+  } else if (hasLinear) {
+    // pure linear from origin
+    lines.push({ x1:px(0), y1:py(0), x2:px(1.0), y2:py(0.92) });
+  } else if (hasConstant && !hasLinear) {
+    // horizontal constant
+    lines.push({ x1:px(0), y1:py(jumpH), x2:px(1.0), y2:py(jumpH) });
+  } else if (hasCurve) {
+    // parabola from origin
+    curves.push(`M ${px(0)} ${py(0)} C ${px(0.3)} ${py(0.02)}, ${px(0.7)} ${py(0.5)}, ${px(1.0)} ${py(0.95)}`);
   } else {
-    // Default: simple linear from origin
-    seg(px(0), py(0), px(1.0), py(0.85));
+    // default: linear from origin
+    lines.push({ x1:px(0), y1:py(0), x2:px(1.0), y2:py(0.85) });
   }
-
-  const lineColor = "#1a237e";
-  const fontSize = compact ? 9 : 11;
 
   return (
     <svg width={W} height={H} style={{ display:"block" }}>
-      {/* Grid lines (subtle) */}
-      {[0.25,0.5,0.75].map(f => (
-        <line key={`gx${f}`} x1={px(f)} y1={12} x2={px(f)} y2={oy}
-          stroke="#e0e0e0" strokeWidth={0.5} strokeDasharray="3,3" />
+      {/* subtle grid */}
+      {[0.25,0.5,0.75].map(f=>(
+        <line key={"gx"+f} x1={px(f)} y1={14} x2={px(f)} y2={oy} stroke="#e8e8e8" strokeWidth={0.5} strokeDasharray="3,3"/>
       ))}
-      {[0.33,0.66].map(f => (
-        <line key={`gy${f}`} x1={ox} y1={py(f)} x2={W-8} y2={py(f)}
-          stroke="#e0e0e0" strokeWidth={0.5} strokeDasharray="3,3" />
+      {[0.33,0.66].map(f=>(
+        <line key={"gy"+f} x1={ox} y1={py(f)} x2={W-6} y2={py(f)} stroke="#e8e8e8" strokeWidth={0.5} strokeDasharray="3,3"/>
       ))}
-
-      {/* Axes */}
-      {/* Y axis */}
-      <line x1={ox} y1={oy} x2={ox} y2={8} stroke="#333" strokeWidth={1.5} />
-      <polygon points={`${ox},8 ${ox-4},16 ${ox+4},16`} fill="#333" />
-      {/* X axis */}
-      <line x1={ox} y1={oy} x2={W-6} y2={oy} stroke="#333" strokeWidth={1.5} />
-      <polygon points={`${W-6},${oy} ${W-14},${oy-4} ${W-14},${oy+4}`} fill="#333" />
-
-      {/* Origin label */}
-      <text x={ox-10} y={oy+12} fontSize={fontSize} fill="#555">O</text>
-
-      {/* Axis labels */}
-      <text x={W-10} y={oy+12} fontSize={fontSize} fontStyle="italic" fill="#333">{xLabel}</text>
-      <text x={4} y={14} fontSize={fontSize} fontStyle="italic" fill="#333">{yLabel}</text>
-
-      {/* Graph segments */}
-      {segments.map((s, i) => (
-        <line key={i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
-          stroke={lineColor} strokeWidth={compact ? 1.8 : 2.2}
-          strokeLinecap="round" />
+      {/* axes */}
+      <line x1={ox} y1={oy} x2={ox} y2={10} stroke="#222" strokeWidth={1.5}/>
+      <polygon points={`${ox},10 ${ox-3.5},18 ${ox+3.5},18`} fill="#222"/>
+      <line x1={ox} y1={oy} x2={W-5} y2={oy} stroke="#222" strokeWidth={1.5}/>
+      <polygon points={`${W-5},${oy} ${W-13},${oy-3.5} ${W-13},${oy+3.5}`} fill="#222"/>
+      {/* labels */}
+      <text x={ox-8} y={oy+fs+2} fontSize={fs} fill="#444" fontFamily="serif">O</text>
+      <text x={W-8} y={oy+fs+2} fontSize={fs} fill="#333" fontFamily="serif" fontStyle="italic">{xLabel}</text>
+      <text x={4} y={16} fontSize={fs} fill="#333" fontFamily="serif" fontStyle="italic">{yLabel}</text>
+      {/* graph lines */}
+      {lines.map((l,i)=>(
+        <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
+          stroke="#1a237e" strokeWidth={lw} strokeLinecap="round" strokeLinejoin="round"/>
       ))}
-
-      {/* Bezier curves */}
-      {extraPaths.map((p, i) => (
-        <path key={`ep${i}`} d={p} stroke={lineColor} strokeWidth={compact ? 1.8 : 2.2}
-          fill="none" strokeLinecap="round" />
+      {curves.map((c,i)=>(
+        <path key={"c"+i} d={c} stroke="#1a237e" strokeWidth={lw} fill="none" strokeLinecap="round"/>
       ))}
     </svg>
   );
 }
 
-/* Detect if a description is a graph/diagram that we can render as SVG */
-function canRenderAsSVG(desc) {
+/* ══════════════════════════════════════════
+   PHYSICS DIAGRAM SVG — blocks, pulleys, strings, etc.
+══════════════════════════════════════════ */
+function PhysicsDiagramSVG({ desc, compact }) {
   const d = desc.toLowerCase();
+  const W = compact ? 200 : 300;
+  const H = compact ? 120 : 160;
+  const fs = compact ? 9 : 11;
+  const fsb = compact ? 8 : 10;
+
+  // ── Pulley system ──
+  if (d.includes("pulley")) {
+    const cx = W/2, pr = compact ? 16 : 22;
+    const blockW = compact ? 28 : 38, blockH = compact ? 20 : 26;
+    const ropeTo = H - (compact ? 18 : 22);
+    const m1 = d.match(/(\d+\.?\d*)\s*kg.*?(\d+\.?\d*)\s*kg/) || [];
+    const m1v = m1[1] || "m₁", m2v = m1[2] || "m₂";
+    return (
+      <svg width={W} height={H} style={{display:"block"}}>
+        {/* ceiling */}
+        <rect x={cx-pr-4} y={6} width={(pr+4)*2} height={6} fill="#555"/>
+        <line x1={0} y1={6} x2={W} y2={6} stroke="#555" strokeWidth={2}/>
+        {/* pulley wheel */}
+        <circle cx={cx} cy={pr+10} r={pr} fill="white" stroke="#444" strokeWidth={compact?1.5:2}/>
+        <circle cx={cx} cy={pr+10} r={pr*0.3} fill="#aaa" stroke="#444" strokeWidth={1}/>
+        {/* ropes */}
+        <line x1={cx-pr} y1={pr+10} x2={cx-pr} y2={ropeTo} stroke="#555" strokeWidth={compact?1.5:2}/>
+        <line x1={cx+pr} y1={pr+10} x2={cx+pr} y2={ropeTo} stroke="#555" strokeWidth={compact?1.5:2}/>
+        {/* blocks */}
+        <rect x={cx-pr-blockW/2} y={ropeTo} width={blockW} height={blockH} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx-pr} y={ropeTo+blockH/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1v} kg</text>
+        <rect x={cx+pr-blockW/2} y={ropeTo} width={blockW} height={blockH} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx+pr} y={ropeTo+blockH/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2v} kg</text>
+      </svg>
+    );
+  }
+
+  // ── Horizontal blocks with forces ──
+  if (d.includes("block") || d.includes("surface")) {
+    const masses = [...d.matchAll(/(\d+\.?\d*)\s*kg/g)].map(m=>m[0]);
+    const forces = [...d.matchAll(/[fF][\d]?\s*=\s*(\d+)\s*n/g)].map(m=>m[0].toUpperCase());
+    const f1val = d.match(/[fF]1\s*=\s*(\d+)/) ? d.match(/[fF]1\s*=\s*(\d+)/)[1]+"N" : forces[0]||"F₁";
+    const f2val = d.match(/[fF]2\s*=\s*(\d+)/) ? d.match(/[fF]2\s*=\s*(\d+)/)[1]+"N" : forces[1]||"F₂";
+    const groundY = H - (compact ? 22 : 30);
+    const blockH2 = compact ? 28 : 38, blockW1 = compact ? 40 : 55, blockW2 = compact ? 48 : 65;
+    const gap = compact ? 4 : 6;
+    const totalW = blockW1 + gap + blockW2;
+    const startX = (W - totalW) / 2;
+    const b1x = startX, b2x = startX + blockW1 + gap;
+    const by = groundY - blockH2;
+    const m1text = masses[0]||"m₁", m2text = masses[1]||"m₂";
+    const arrowLen = compact ? 32 : 44;
+    return (
+      <svg width={W} height={H} style={{display:"block"}}>
+        {/* ground */}
+        <line x1={0} y1={groundY} x2={W} y2={groundY} stroke="#555" strokeWidth={1.5}/>
+        <line x1={0} y1={groundY} x2={W} y2={groundY+compact?5:7} stroke="#ccc" strokeWidth={1}/>
+        {[...Array(7)].map((_,i)=>(
+          <line key={i} x1={i*(W/6)} y1={groundY} x2={i*(W/6)-(compact?5:7)} y2={groundY+(compact?5:7)} stroke="#bbb" strokeWidth={1}/>
+        ))}
+        {/* blocks */}
+        <rect x={b1x} y={by} width={blockW1} height={blockH2} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={b1x+blockW1/2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1text}</text>
+        <rect x={b2x} y={by} width={blockW2} height={blockH2} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={b2x+blockW2/2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2text}</text>
+        {/* F1 arrow from left */}
+        <line x1={b1x-arrowLen} y1={by+blockH2/2} x2={b1x-2} y2={by+blockH2/2} stroke="#e53935" strokeWidth={compact?2:2.5}/>
+        <polygon points={`${b1x-2},${by+blockH2/2} ${b1x-arrowLen*0.3+b1x-arrowLen},${by+blockH2/2-4} ${b1x-arrowLen*0.3+b1x-arrowLen},${by+blockH2/2+4}`}
+          transform={`rotate(180,${b1x-2},${by+blockH2/2})`} fill="#e53935"/>
+        <polygon points={`${b1x-2},${by+blockH2/2} ${b1x-10},${by+blockH2/2-4} ${b1x-10},${by+blockH2/2+4}`} fill="#e53935"/>
+        <text x={b1x-arrowLen/2} y={by+blockH2/2-5} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f1val}</text>
+        {/* F2 arrow from right */}
+        <line x1={b2x+blockW2+2} y1={by+blockH2/2} x2={b2x+blockW2+arrowLen} y2={by+blockH2/2} stroke="#e53935" strokeWidth={compact?2:2.5}/>
+        <polygon points={`${b2x+blockW2+2},${by+blockH2/2} ${b2x+blockW2+10},${by+blockH2/2-4} ${b2x+blockW2+10},${by+blockH2/2+4}`} fill="#e53935"/>
+        <text x={b2x+blockW2+arrowLen/2+2} y={by+blockH2/2-5} textAnchor="middle" fontSize={fsb} fill="#c62828" fontWeight="700" fontFamily="sans-serif">{f2val}</text>
+      </svg>
+    );
+  }
+
+  // ── String / two masses on surface ──
+  if (d.includes("string") && d.includes("mass")) {
+    const W2=W, H2=H;
+    const groundY = H2-(compact?22:30);
+    const blockH2=compact?26:34, blockW2=compact?36:48;
+    const cx1=W2*0.25, cx2=W2*0.75;
+    const by=groundY-blockH2;
+    const masses=[...d.matchAll(/(\d+\.?\d*)\s*kg/g)].map(m=>m[1]);
+    const m1=masses[0]||"m₁", m2=masses[1]||"m₂";
+    return (
+      <svg width={W2} height={H2} style={{display:"block"}}>
+        <line x1={0} y1={groundY} x2={W2} y2={groundY} stroke="#555" strokeWidth={1.5}/>
+        {[...Array(8)].map((_,i)=>(
+          <line key={i} x1={i*(W2/7)} y1={groundY} x2={i*(W2/7)-5} y2={groundY+5} stroke="#bbb" strokeWidth={1}/>
+        ))}
+        <rect x={cx1-blockW2/2} y={by} width={blockW2} height={blockH2} fill="#90caf9" stroke="#1565c0" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx1} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#0d47a1" fontFamily="sans-serif">{m1} kg</text>
+        <line x1={cx1+blockW2/2} y1={by+blockH2/2} x2={cx2-blockW2/2} y2={by+blockH2/2} stroke="#555" strokeWidth={compact?1.5:2}/>
+        <rect x={cx2-blockW2/2} y={by} width={blockW2} height={blockH2} fill="#a5d6a7" stroke="#2e7d32" strokeWidth={compact?1.5:2} rx={3}/>
+        <text x={cx2} y={by+blockH2/2+fs*0.4} textAnchor="middle" fontSize={fsb} fontWeight="700" fill="#1b5e20" fontFamily="sans-serif">{m2} kg</text>
+        <text x={W2/2} y={by-4} textAnchor="middle" fontSize={fsb} fill="#555" fontFamily="sans-serif">string</text>
+      </svg>
+    );
+  }
+
+  // ── Force diagram (generic) ──
+  const cx = W/2, cy = H/2;
   return (
-    d.includes("graph") || d.includes("a-t") || d.includes("v-t") ||
-    d.includes("acceleration") || d.includes("velocity") ||
-    d.includes("displacement") || d.includes("increases") ||
-    d.includes("constant") || d.includes("linearly") ||
-    d.includes("parabola") || d.includes("curve") ||
-    d.includes("horizontal line") || d.includes("straight line") ||
-    d.includes("axis") || d.includes("plot")
+    <svg width={W} height={H} style={{display:"block"}}>
+      <text x={cx} y={cy} textAnchor="middle" fontSize={fs} fill="#444" fontFamily="sans-serif">
+        [Physics Diagram]
+      </text>
+      <text x={cx} y={cy+fs+4} textAnchor="middle" fontSize={fs-1} fill="#888" fontFamily="sans-serif" fontStyle="italic">
+        {desc.slice(0,60)}{desc.length>60?"...":""}
+      </text>
+    </svg>
   );
 }
 
+/* ══════════════════════════════════════════
+   Detect what kind of diagram to render
+══════════════════════════════════════════ */
+function getDiagramType(desc) {
+  const d = desc.toLowerCase();
+  const isGraph = d.includes("graph") || d.includes("a-t") || d.includes("v-t") ||
+    d.includes("acceleration") || d.includes("velocity") ||
+    d.includes("increases linearly") || d.includes("parabola") ||
+    d.includes("concave") || d.includes("constant") && d.includes("linear") ||
+    d.includes("straight line") || d.includes("axis");
+  const isPhysics = d.includes("block") || d.includes("pulley") || d.includes("surface") ||
+    d.includes("string") || d.includes("force") || d.includes("mass");
+  if (isGraph) return "graph";
+  if (isPhysics) return "physics";
+  return "text";
+}
+
 function FigureBox({ desc, compact }) {
-  const showSVG = canRenderAsSVG(desc);
+  const type = getDiagramType(desc);
   return (
     <div style={{
-      border: `1.5px solid ${compact ? "#5c6bc0" : "#1a237e"}`,
+      border: `1.5px solid #1a237e`,
       borderRadius: compact ? 6 : 8,
       overflow: "hidden",
       background: "white",
       display: "inline-block",
-      width: compact ? "auto" : "100%",
+      maxWidth: "100%",
     }}>
-      {/* Header */}
       <div style={{
-        background: compact ? "#3949ab" : "#1a237e",
+        background: "#1a237e",
         color: "white",
         padding: compact ? "3px 8px" : "5px 12px",
         fontSize: compact ? 9 : 11,
         fontWeight: 700,
         letterSpacing: 0.4,
-        display: "flex", alignItems: "center", gap: 4,
+        display: "flex", alignItems: "center", gap: 5,
       }}>
         <span>📊</span> FIGURE / DIAGRAM
       </div>
-      {/* Content */}
-      <div style={{ padding: compact ? "6px 8px" : "10px 14px", textAlign: "center" }}>
-        {showSVG ? (
-          <DiagramSVG desc={desc} compact={compact} />
-        ) : (
-          /* Non-graph diagrams: show description text */
+      <div style={{ padding: compact ? "4px 6px" : "8px 12px", textAlign: "center" }}>
+        {type === "graph" && <GraphSVG desc={desc} compact={compact} />}
+        {type === "physics" && <PhysicsDiagramSVG desc={desc} compact={compact} />}
+        {type === "text" && (
           <div style={{
             fontSize: compact ? 11 : 13,
             color: "#222",
@@ -358,6 +431,8 @@ function FigureBox({ desc, compact }) {
             textAlign: "left",
             borderLeft: "3px solid #1a237e",
             paddingLeft: 10,
+            padding: compact ? "4px 8px" : "8px 12px",
+            maxWidth: compact ? 220 : 400,
           }}>
             {renderMath(desc)}
           </div>
@@ -369,7 +444,6 @@ function FigureBox({ desc, compact }) {
 
 function renderQuestionText(text, compact) {
   if (!text) return null;
-  // Split text by [FIGURE: ...] tags
   const parts = text.split(/(\[FIGURE:[^\]]+\])/gi);
   return parts.map((part, i) => {
     const figMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
@@ -382,6 +456,7 @@ function renderQuestionText(text, compact) {
     return <span key={i}>{mathRendered}</span>;
   });
 }
+
 
 /* ─────────────────────────────────────────────
    DEMO QUESTIONS
