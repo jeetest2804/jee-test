@@ -13,7 +13,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// Generous timeout for large PDF processing
 app.use((req, res, next) => {
   res.setTimeout(180_000, () => {
     res.status(503).json({ error: "Server timeout — PDF may be too large. Try a smaller file." });
@@ -25,15 +24,75 @@ app.use((req, res, next) => {
 const distPath = join(__dirname, "dist");
 app.use(express.static(distPath));
 
+/* ══════════════════════════════════════════════════════════════════
+   PERMANENT FIX: Dynamic model discovery
+
+   Instead of hardcoding model names (which break when Google
+   retires them), we call Google's /v1beta/models endpoint at startup
+   to discover which models are actually available RIGHT NOW.
+
+   Cached for 1 hour. Auto-invalidated on any 404 response.
+   This means the app AUTOMATICALLY adapts — no code changes needed.
+══════════════════════════════════════════════════════════════════ */
+
+const PREFERRED_ORDER = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-2.0-flash-exp",
+];
+
+let cachedModels = null;
+let cacheTime = 0;
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+async function getAvailableModels(apiKey) {
+  const now = Date.now();
+  if (cachedModels && (now - cacheTime) < CACHE_TTL) return cachedModels;
+
+  try {
+    console.log("[Models] Fetching live model list from Google...");
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = await res.json();
+    const available = (data.models || [])
+      .filter(m => m.supportedGenerationMethods?.includes("generateContent"))
+      .map(m => m.name.replace("models/", ""));
+
+    // Sort by preference, then append any new models Google adds
+    const sorted = [
+      ...PREFERRED_ORDER.filter(m => available.includes(m)),
+      ...available.filter(m => !PREFERRED_ORDER.includes(m) && m.startsWith("gemini")),
+    ];
+
+    cachedModels = sorted.length > 0 ? sorted : PREFERRED_ORDER;
+    cacheTime = now;
+    console.log(`[Models] Live list: ${cachedModels.join(", ")}`);
+    return cachedModels;
+  } catch (err) {
+    console.error("[Models] Could not fetch list:", err.message, "— using defaults");
+    return PREFERRED_ORDER;
+  }
+}
+
+/* ── /api/models — frontend can query what's available ── */
+app.get("/api/models", async (req, res) => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: "No API key" });
+  const models = await getAvailableModels(apiKey);
+  res.json({ models });
+});
+
 /* ══════════════════════════════════════════════════════
-   /api/parse-pdf  — Gemini AI PDF parsing (FREE)
-   Model is selected by admin from the web UI and
-   passed in the request body as "model".
-   Fallback order if model fails: flash → 2.0-flash → pro
+   /api/parse-pdf  — Gemini AI PDF parsing
 ══════════════════════════════════════════════════════ */
 app.post("/api/parse-pdf", async (req, res) => {
   const geminiApiKey = process.env.GEMINI_API_KEY;
-
   if (!geminiApiKey) {
     return res.status(500).json({
       error: "GEMINI_API_KEY is not set. Add it in Render → Environment → Environment Variables.",
@@ -41,82 +100,42 @@ app.post("/api/parse-pdf", async (req, res) => {
   }
 
   const { base64, isKey, model: requestedModel } = req.body;
-  if (!base64) {
-    return res.status(400).json({ error: "Missing base64 PDF data" });
-  }
+  if (!base64) return res.status(400).json({ error: "Missing base64 PDF data" });
 
   const prompt = isKey
-    ? `Extract answer key from this JEE PDF. Return ONLY valid JSON — no markdown, no extra text:
+    ? `Extract answer key from this JEE PDF. Return ONLY valid JSON — no markdown:
 {"answers":[{"q":1,"correct":1,"type":"mcq"},{"q":2,"correct":24,"type":"integer"},...]}
-Rules:
-- For MCQ: correct is the 0-based index of the correct option (0=A, 1=B, 2=C, 3=D)
-- For integer: correct is the numeric answer itself
-- Include every question that has an answer
-- Output pure JSON only, no explanation`
-    : `Extract ALL questions from this JEE exam PDF. Return ONLY valid JSON — no markdown, no extra text:
-{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"full question text here","options":["option1 text","option2 text","option3 text","option4 text"],"correct":2,"marks":4,"negative":-1}]}
-Rules:
-- subject must be exactly one of: "Physics", "Chemistry", "Mathematics"
-- type is "mcq" for 4-option questions, or "integer" for numeric answer (set options=[])
-- For MCQ: correct is the 0-based index of the correct option (0=A, 1=B, 2=C, 3=D)
-- For integer: correct is the numeric answer
-- options must contain plain text only — NO "A)" "B)" prefixes
-- marks is typically 4, negative is typically -1 for MCQ and 0 for integer
-- Extract EVERY question in the PDF, do not skip any
-- Output pure JSON only, no explanation`;
+- For MCQ: correct is 0-based index (0=A,1=B,2=C,3=D). For integer: correct is the number.`
+    : `Extract ALL questions from this JEE exam PDF. Return ONLY valid JSON — no markdown:
+{"questions":[{"id":1,"subject":"Physics","type":"mcq","text":"...","options":["opt1","opt2","opt3","opt4"],"correct":2,"marks":4,"negative":-1}]}
+- subject: "Physics", "Chemistry", or "Mathematics" only
+- type: "mcq" for 4-option, "integer" for numeric (set options=[])
+- correct: 0-based index for MCQ, numeric value for integer
+- NO "A)" "B)" prefixes in options text
+- Extract EVERY question. Output pure JSON only.`;
 
-  // Build model list: requested model first, then fallbacks
-  // Only models verified to work on free v1beta API
-  const ALL_MODELS = [
-    "gemini-2.0-flash",                // FREE — 1500 req/day — most reliable
-    "gemini-2.0-flash-lite",           // FREE — 1500 req/day — faster/lighter
-    "gemini-2.5-pro-exp-03-25",    // FREE tier — 50 req/day — most accurate
-  ];
-  // If client sends a deprecated model (e.g. saved in their browser from old version), remap it
-  const DEPRECATED_REMAP = {
-    "gemini-1.5-flash":    "gemini-2.0-flash",
-    "gemini-1.5-flash-8b": "gemini-2.0-flash-lite",
-    "gemini-1.5-pro":      "gemini-2.5-pro-exp-03-25",
-  };
-  const remapped = requestedModel && DEPRECATED_REMAP[requestedModel]
-    ? DEPRECATED_REMAP[requestedModel]
-    : requestedModel;
-  const primary = remapped && ALL_MODELS.includes(remapped)
-    ? remapped
-    : "gemini-2.0-flash";
-  const fallbacks = ALL_MODELS.filter(m => m !== primary);
-  const models = [primary, ...fallbacks];
+  // Get live model list, try requested model first
+  const allModels = await getAvailableModels(geminiApiKey);
+  const models = requestedModel && allModels.includes(requestedModel)
+    ? [requestedModel, ...allModels.filter(m => m !== requestedModel)]
+    : allModels;
 
   let lastError = null;
 
   for (const model of models) {
     try {
-      console.log(`[Gemini] Trying model: ${model}, isKey=${isKey}, base64 length=${base64.length}`);
-
+      console.log(`[Gemini] Trying: ${model}`);
       const geminiRes = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    inline_data: {
-                      mime_type: "application/pdf",
-                      data: base64,
-                    },
-                  },
-                  { text: prompt },
-                ],
-              },
-            ],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 8192,
-              // NOTE: Do NOT set responseMimeType — it breaks text extraction
-            },
+            contents: [{ parts: [
+              { inline_data: { mime_type: "application/pdf", data: base64 } },
+              { text: prompt },
+            ]}],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
           }),
         }
       );
@@ -125,86 +144,65 @@ Rules:
         const errBody = await geminiRes.text();
         lastError = `Gemini ${model} HTTP ${geminiRes.status}: ${errBody}`;
         console.error(`[Gemini] ${lastError}`);
+        if (geminiRes.status === 404) {
+          console.log(`[Models] ${model} is gone — invalidating cache`);
+          cachedModels = null; // Force re-discovery on next request
+        }
         continue;
       }
 
       const data = await geminiRes.json();
-      console.log(`[Gemini] Response keys:`, Object.keys(data));
-
       let txt = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      console.log(`[Gemini] Raw text (first 300 chars):`, txt.slice(0, 300));
 
       if (!txt) {
-        const finishReason = data.candidates?.[0]?.finishReason;
-        lastError = `Gemini ${model} returned empty text. finishReason=${finishReason}`;
+        lastError = `${model} returned empty. finishReason=${data.candidates?.[0]?.finishReason}`;
         console.error(`[Gemini] ${lastError}`);
         continue;
       }
 
-      // Strip markdown code fences if present
-      txt = txt
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "")
-        .trim();
-
-      // Find outermost JSON object
+      txt = txt.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
       const start = txt.indexOf("{");
       const end = txt.lastIndexOf("}");
       if (start === -1 || end === -1) {
-        lastError = `Gemini ${model}: No JSON object found. Raw: ${txt.slice(0, 300)}`;
-        console.error(`[Gemini] ${lastError}`);
+        lastError = `${model}: no JSON found`;
         continue;
       }
 
-      const jsonStr = txt.slice(start, end + 1);
       let parsed;
-      try {
-        parsed = JSON.parse(jsonStr);
-      } catch (parseErr) {
-        lastError = `Gemini ${model}: JSON parse failed — ${parseErr.message}. Raw: ${jsonStr.slice(0, 300)}`;
-        console.error(`[Gemini] ${lastError}`);
-        continue;
-      }
+      try { parsed = JSON.parse(txt.slice(start, end + 1)); }
+      catch (e) { lastError = `${model}: JSON parse failed — ${e.message}`; continue; }
 
-      // Validate shape
-      if (!isKey && (!parsed.questions || !Array.isArray(parsed.questions) || parsed.questions.length === 0)) {
-        lastError = `Gemini ${model}: questions array empty/missing. Keys: ${Object.keys(parsed)}`;
-        console.error(`[Gemini] ${lastError}`);
-        continue;
-      }
-      if (isKey && (!parsed.answers || !Array.isArray(parsed.answers) || parsed.answers.length === 0)) {
-        lastError = `Gemini ${model}: answers array empty/missing. Keys: ${Object.keys(parsed)}`;
-        console.error(`[Gemini] ${lastError}`);
-        continue;
-      }
+      if (!isKey && (!parsed.questions?.length)) { lastError = `${model}: questions empty`; continue; }
+      if (isKey && (!parsed.answers?.length)) { lastError = `${model}: answers empty`; continue; }
 
       const count = isKey ? parsed.answers.length : parsed.questions.length;
-      console.log(`[Gemini] ✅ Success with ${model}! Items extracted: ${count}`);
+      console.log(`[Gemini] ✅ ${model} succeeded! Items: ${count}`);
       return res.status(200).json({ ok: true, data: parsed, modelUsed: model });
 
-    } catch (fetchErr) {
-      lastError = `Fetch error for ${model}: ${fetchErr.message}`;
+    } catch (err) {
+      lastError = `Fetch error for ${model}: ${err.message}`;
       console.error(`[Gemini] ${lastError}`);
       continue;
     }
   }
 
-  console.error("[Gemini] All models failed. Last error:", lastError);
-  return res.status(502).json({ error: lastError || "All Gemini models failed. Check Render logs." });
+  return res.status(502).json({ error: lastError || "All models failed." });
 });
 
-/* ── Catch-all: serve React app (SPA routing) ── */
+/* ── Catch-all: serve React app ── */
 app.get("*", (req, res) => {
   const indexPath = join(distPath, "index.html");
-  if (existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.status(404).send("App not built yet. Run: npm run build");
-  }
+  existsSync(indexPath)
+    ? res.sendFile(indexPath)
+    : res.status(404).send("App not built yet. Run: npm run build");
 });
 
-// Must bind to 0.0.0.0 explicitly — Render scans all interfaces for the open port
+// Bind 0.0.0.0 — required for Render to detect the open port
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ TestForge server running on port ${PORT}`);
+  if (process.env.GEMINI_API_KEY) {
+    getAvailableModels(process.env.GEMINI_API_KEY)
+      .then(m => console.log(`[Models] Ready. Will try: ${m[0]} first`))
+      .catch(() => {});
+  }
 });
