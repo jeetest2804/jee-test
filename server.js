@@ -113,17 +113,21 @@ async function pdfPageToBase64(pdfBase64, pageNumber, cropRegion) {
         const dimOut = execSync(`identify -format "%wx%h" "${imgPath}"`, { stdio: "pipe" }).toString().trim();
         const [imgW, imgH] = dimOut.split("x").map(Number);
 
-        // Add 3% padding above/below the figure region, clamp to [0, 100]
+        // Add 3% padding around the figure region, clamp to [0, 100]
         const pad = 3;
         const topPct  = Math.max(0,   cropRegion.top    - pad);
         const botPct  = Math.min(100, cropRegion.bottom + pad);
+        const leftPct = Math.max(0,   (cropRegion.left  ?? 0)   - pad);
+        const rightPct= Math.min(100, (cropRegion.right ?? 100) + pad);
 
-        const cropY      = Math.round((topPct  / 100) * imgH);
-        const cropHeight = Math.round(((botPct - topPct) / 100) * imgH);
+        const cropX      = Math.round((leftPct           / 100) * imgW);
+        const cropY      = Math.round((topPct            / 100) * imgH);
+        const cropWidth  = Math.round(((rightPct - leftPct) / 100) * imgW);
+        const cropHeight = Math.round(((botPct  - topPct ) / 100) * imgH);
 
-        if (cropHeight > 10) {
+        if (cropHeight > 10 && cropWidth > 10) {
           execSync(
-            `convert "${imgPath}" -crop ${imgW}x${cropHeight}+0+${cropY} +repage "${croppedPath}"`,
+            `convert "${imgPath}" -crop ${cropWidth}x${cropHeight}+${cropX}+${cropY} +repage "${croppedPath}"`,
             { timeout: 15000, stdio: "pipe" }
           );
           if (existsSync(croppedPath)) {
@@ -156,6 +160,97 @@ app.post("/api/page-image", async (req, res) => {
   const image = await pdfPageToBase64(base64, page, cropRegion);
   if (!image) return res.status(500).json({ error: "Could not render PDF page. Is poppler-utils installed?" });
   return res.json({ ok: true, image, page });
+});
+
+/* /api/detect-figure-region — given a full-page PNG (base64) and a question text snippet,
+   use Gemini vision to locate the figure and return {top, bottom, left, right} percentages.
+   Falls back to null (no crop) if detection fails — caller decides what to do. */
+app.post("/api/detect-figure-region", async (req, res) => {
+  const { pageImageBase64, questionHint } = req.body;
+  if (!pageImageBase64) return res.status(400).json({ error: "Missing pageImageBase64" });
+
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) return res.json({ ok: true, region: null });
+
+  const prompt = `This is a page from a JEE (Indian entrance exam) paper.${questionHint ? ` The question is about: "${questionHint}"` : ""}
+
+Your task: find the TIGHT bounding box of ONLY the diagram, figure, or graph on this page. Do NOT include the question text, answer options, or blank whitespace in the bounding box.
+
+Reply ONLY with a JSON object — no markdown, no explanation:
+{"top": <integer 0-100>, "bottom": <integer 0-100>, "left": <integer 0-100>, "right": <integer 0-100>}
+
+Where all values are percentages of page dimensions (0=top/left edge, 100=bottom/right edge).
+- top/bottom: vertical position as % of page HEIGHT
+- left/right: horizontal position as % of page WIDTH
+
+Rules:
+- Be as TIGHT as possible — crop to just the diagram itself
+- If there are multiple figures, return the one most relevant to the question hint
+- If there is truly NO figure/diagram on this page, reply with: {"top": null, "bottom": null, "left": null, "right": null}
+- NEVER return top:0, bottom:100, left:0, right:100 — that means full page and is wrong`;
+
+  try {
+    const allModels = await getAvailableModels(geminiApiKey);
+    const fastModels = allModels.filter(m =>
+      m.includes("flash") || m.includes("2.0") || m.includes("1.5-flash")
+    ).slice(0, 3);
+    const modelsToTry = fastModels.length > 0 ? fastModels : allModels.slice(0, 2);
+
+    for (const model of modelsToTry) {
+      try {
+        const apiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { inline_data: { mime_type: "image/png", data: pageImageBase64 } },
+                  { text: prompt }
+                ]
+              }],
+              generationConfig: { temperature: 0, maxOutputTokens: 80 }
+            })
+          }
+        );
+        const data = await apiRes.json();
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const clean = raw.replace(/```json|```/g, "").trim();
+        const parsed = JSON.parse(clean);
+
+        // If Gemini explicitly says no figure
+        if (parsed.top === null || parsed.bottom === null) {
+          console.log(`[DetectRegion] ${model} → no figure detected`);
+          return res.json({ ok: true, region: null });
+        }
+
+        if (parsed.top !== undefined && parsed.bottom !== undefined) {
+          const top    = Math.max(0,   Math.min(100, Number(parsed.top)));
+          const bottom = Math.min(100, Math.max(0,   Number(parsed.bottom)));
+          const left   = parsed.left  != null ? Math.max(0,   Math.min(100, Number(parsed.left)))  : 0;
+          const right  = parsed.right != null ? Math.min(100, Math.max(0,   Number(parsed.right))) : 100;
+
+          // Require a meaningful crop — reject if it's basically the full page
+          const heightCoverage = bottom - top;
+          const widthCoverage  = right  - left;
+          const isFullPage = heightCoverage > 90 && widthCoverage > 90;
+
+          if (bottom > top + 5 && right > left + 5 && !isFullPage) {
+            console.log(`[DetectRegion] ${model} → top:${top} bottom:${bottom} left:${left} right:${right}`);
+            return res.json({ ok: true, region: { top, bottom, left, right } });
+          }
+        }
+      } catch (e) {
+        console.error(`[DetectRegion] ${model} failed:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error("[DetectRegion] outer error:", e.message);
+  }
+
+  // Detection failed — return null so the caller can handle it gracefully
+  return res.json({ ok: true, region: null });
 });
 
 /* ══════════════════════════════════════════════════════════════════
