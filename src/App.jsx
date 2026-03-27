@@ -1295,7 +1295,7 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
     }));
   }
 
-  const CENTER_STRIP = { top: 15, bottom: 85, left: 0, right: 100 };
+  const CENTER_STRIP = { top: 35, bottom: 80, left: 0, right: 100 };
   const jobMap = {};
   questions.forEach(q => {
     if (!q.hasFigure || !q.figurePageNumber) return;
