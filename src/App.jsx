@@ -143,35 +143,43 @@ function renderMath(text) {
    pdfBase64 is stored in window.__pdfBase64 after upload
 ══════════════════════════════════════════ */
 function PageImageFigure({ imageData, pageNumber, compact, label }) {
-  // imageData is a base64 PNG already embedded in the question object at creation time
-  // pageNumber is kept as fallback label only
-  const w = compact ? 260 : 420;
+  const maxW = compact ? 280 : 460;
 
   if (!imageData) {
-    // No image data — show a clean placeholder
     return (
       <div style={{
-        border: "1.5px dashed #bbb", borderRadius: compact ? 6 : 8,
-        display: "inline-block", padding: compact ? "8px 14px" : "12px 20px",
-        color: "#999", fontSize: compact ? 10 : 12, fontStyle: "italic",
-        background: "#fafafa", verticalAlign: "top",
+        display: "block", margin: compact ? "8px 0" : "12px 0",
+        border: "1.5px dashed #c7d2fe", borderRadius: compact ? 8 : 10,
+        padding: compact ? "10px 16px" : "14px 22px",
+        color: "#6366f1", fontSize: compact ? 11 : 13,
+        background: "#eef2ff", width: "fit-content",
       }}>
-        📊 Figure{pageNumber ? ` (page ${pageNumber})` : ""}
+        📊 {label || "Figure"}{pageNumber ? ` — page ${pageNumber}` : ""}
       </div>
     );
   }
 
   return (
     <div style={{
-      border: "2px solid #1a237e", borderRadius: compact ? 6 : 8,
-      overflow: "hidden", background: "white",
-      display: "inline-block", maxWidth: "100%", verticalAlign: "top",
-      boxShadow: "0 2px 8px rgba(26,35,126,0.12)",
+      display: "block",
+      margin: compact ? "8px 0" : "14px 0",
+      border: "1.5px solid #c7d2fe",
+      borderRadius: compact ? 8 : 10,
+      overflow: "hidden",
+      background: "white",
+      width: "fit-content",
+      maxWidth: "100%",
+      boxShadow: "0 2px 10px rgba(79,70,229,0.10)",
     }}>
+      {label && (
+        <div style={{ padding: compact ? "4px 10px" : "5px 12px", background: "#eef2ff", borderBottom: "1px solid #c7d2fe", fontSize: compact ? 10 : 11, color: "#4f46e5", fontWeight: 600 }}>
+          {label}
+        </div>
+      )}
       <img
         src={`data:image/png;base64,${imageData}`}
         alt={label || "Figure"}
-        style={{ maxWidth: w, width: "100%", height: "auto", display: "block" }}
+        style={{ maxWidth: maxW, width: "100%", height: "auto", display: "block" }}
       />
     </div>
   );
@@ -593,22 +601,40 @@ function FigureBox({ desc, compact }) {
 function renderQuestionText(text, compact, figurePageNumber, figureImageData) {
   if (!text) return null;
   const parts = text.split(/(\[FIGURE(?:_[ABCD])?\]|\[FIGURE:[^\]]+\])/gi);
-  return parts.map((part, i) => {
+
+  // Separate text parts from figure parts so figures always render in a clean block
+  const textParts = [];
+  const figureParts = [];
+
+  parts.forEach((part, i) => {
     if (/^\[FIGURE\]$/i.test(part)) {
-      return <PageImageFigure key={i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label="Figure" />;
+      figureParts.push(<PageImageFigure key={"fig-"+i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label={null} />);
+    } else {
+      const optMatch = part.match(/^\[FIGURE_([ABCD])\]$/i);
+      if (optMatch) {
+        figureParts.push(<PageImageFigure key={"fig-"+i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label={`Option ${optMatch[1]}`} />);
+      } else {
+        const legacyMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
+        if (legacyMatch) {
+          figureParts.push(<FigureBox key={"fig-"+i} desc={legacyMatch[1].trim()} compact={compact} />);
+        } else {
+          const mathRendered = renderMath(part);
+          if (mathRendered) textParts.push(<span key={"txt-"+i}>{mathRendered}</span>);
+        }
+      }
     }
-    const optMatch = part.match(/^\[FIGURE_([ABCD])\]$/i);
-    if (optMatch) {
-      return <PageImageFigure key={i} imageData={figureImageData} pageNumber={figurePageNumber} compact={compact} label={`Option ${optMatch[1]}`} />;
-    }
-    const legacyMatch = part.match(/^\[FIGURE:\s*(.*?)\s*\]$/is);
-    if (legacyMatch) {
-      return <FigureBox key={i} desc={legacyMatch[1].trim()} compact={compact} />;
-    }
-    const mathRendered = renderMath(part);
-    if (!mathRendered) return null;
-    return <span key={i}>{mathRendered}</span>;
   });
+
+  return (
+    <div style={{ display: "block" }}>
+      {textParts.length > 0 && <div style={{ lineHeight: 1.7 }}>{textParts}</div>}
+      {figureParts.length > 0 && (
+        <div style={{ marginTop: figureParts.length > 0 && textParts.length > 0 ? (compact ? 8 : 12) : 0 }}>
+          {figureParts}
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -852,7 +878,7 @@ export default function App() {
     <TestScreen test={activeTest} student={user} onSubmit={handleSubmit} />
   );
   if (page === "results") return (
-    <ResultsScreen test={activeTest} student={user} submission={submission}
+    <ResultsScreen test={activeTest} student={user?.name || user} submission={submission}
       onBack={() => setPage("student")} />
   );
 }
@@ -2948,7 +2974,7 @@ function ResultsScreen({ test, student, submission, onBack }) {
                               color: isCorrect ? "#15803d" : isChosen&&!isCorrect ? "#b91c1c" : DS.textMid,
                               fontWeight: isCorrect||isChosen ? 600 : 400 }}>
                               <span style={{ fontWeight:700, marginRight:6 }}>{["A","B","C","D"][oi]}.</span>
-                              {renderQuestionText(opt, true, null, null)}
+                              {renderQuestionText(opt, true, q.figurePageNumber, q.figureImageData)}
                             </div>
                           );
                         })}
