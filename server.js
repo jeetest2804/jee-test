@@ -208,12 +208,13 @@ async function pdfPageToBase64(pdfBase64, pageNumber, cropRegion) {
         const dimOut = execSync(`identify -format "%wx%h" "${imgPath}"`, { stdio: "pipe" }).toString().trim();
         const [imgW, imgH] = dimOut.split("x").map(Number);
 
-        // Add 3% padding around the figure region, clamp to [0, 100]
-        const pad = 3;
-        const topPct  = Math.max(0,   cropRegion.top    - pad);
-        const botPct  = Math.min(100, cropRegion.bottom + pad);
-        const leftPct = Math.max(0,   (cropRegion.left  ?? 0)   - pad);
-        const rightPct= Math.min(100, (cropRegion.right ?? 100) + pad);
+        // Tight crop: 1% top padding (avoid pulling in question text), 3% elsewhere
+        const topPad  = 1;
+        const otherPad = 3;
+        const topPct  = Math.max(0,   cropRegion.top    - topPad);
+        const botPct  = Math.min(100, cropRegion.bottom + otherPad);
+        const leftPct = Math.max(0,   (cropRegion.left  ?? 0)   - otherPad);
+        const rightPct= Math.min(100, (cropRegion.right ?? 100) + otherPad);
 
         const cropX      = Math.round((leftPct           / 100) * imgW);
         const cropY      = Math.round((topPct            / 100) * imgH);
@@ -269,7 +270,7 @@ app.post("/api/detect-figure-region", async (req, res) => {
 
   const prompt = `This is a page from a JEE (Indian entrance exam) paper.${questionHint ? ` The question is about: "${questionHint}"` : ""}
 
-Your task: find the TIGHT bounding box of ONLY the diagram, figure, or graph on this page. Do NOT include the question text, answer options, or blank whitespace in the bounding box.
+Your task: find the TIGHT bounding box of ONLY the diagram, figure, or graph on this page. CRITICAL: Do NOT include question text, answer options, labels like "(A) (B)", captions, or any text above or below the diagram. The bounding box must start at the very top edge of the actual drawing/image, not the text.
 
 Reply ONLY with a JSON object — no markdown, no explanation:
 {"top": <integer 0-100>, "bottom": <integer 0-100>, "left": <integer 0-100>, "right": <integer 0-100>}
